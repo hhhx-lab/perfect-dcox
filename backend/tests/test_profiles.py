@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.profiles.models import FormatProfile
+from app.profiles.seed import load_builtin_profiles
 
 
 def valid_profile_payload() -> dict[str, object]:
@@ -156,3 +157,26 @@ def test_unknown_profile_fields_are_rejected() -> None:
         FormatProfile.model_validate(payload)
 
     assert "Extra inputs are not permitted" in str(exc.value)
+
+
+def test_ecnu_builtin_profile_is_loaded_from_yaml() -> None:
+    profiles = load_builtin_profiles()
+
+    ecnu = profiles["ecnu_thesis"]
+    assert ecnu.status == "active"
+    assert ecnu.version == "1.0.0"
+    assert ecnu.source == "system"
+    assert ecnu.page.size == "A4"
+    assert ecnu.page.margins_cm.top == 2.5
+    assert ecnu.page.margins_cm.bottom == 2.0
+    assert ecnu.page.margins_cm.left == 3.0
+    assert ecnu.page.margins_cm.right == 2.5
+    assert ecnu.fonts.default_chinese == "SimSun"
+    assert ecnu.fonts.default_latin == "Times New Roman"
+    assert ecnu.body.line_spacing == 1.5
+    assert ecnu.body.first_line_indent_chars == 2
+    assert ecnu.abstract.length_range_chars.min == 300
+    assert ecnu.abstract.length_range_chars.max == 500
+    assert ecnu.table.caption.position == "above"
+    assert ecnu.figure.caption.position == "below"
+    assert ecnu.quality.check_fonts is True

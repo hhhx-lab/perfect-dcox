@@ -1,0 +1,96 @@
+id: ecnu_thesis
+name: 华东师范大学毕业论文格式
+version: 1.0.0
+status: active
+source: system
+description: 基于仓库内产品方案与本地 ECNU 格式样本整理的内置示例 profile，未确认规则保持为可编辑示例值。
+page:
+  size: A4
+  orientation: portrait
+  margins_cm:
+    top: 2.5
+    bottom: 2.0
+    left: 3.0
+    right: 2.5
+    gutter: 0.0
+fonts:
+  default_chinese: SimSun
+  default_latin: Times New Roman
+  default_size_pt: 12
+body:
+  font:
+    chinese: SimSun
+    latin: Times New Roman
+    size_pt: 12
+    weight: normal
+  first_line_indent_chars: 2
+  line_spacing: 1.5
+  alignment: justified
+headings:
+  - level: 1
+    font:
+      chinese: SimHei
+      latin: Times New Roman
+      size_pt: 15
+      weight: bold
+    alignment: center
+    numbering: none
+  - level: 2
+    font:
+      chinese: SimHei
+      latin: Times New Roman
+      size_pt: 12
+      weight: bold
+    alignment: left
+    numbering: decimal
+abstract:
+  length_range_chars:
+    min: 300
+    max: 500
+  title_font:
+    chinese: SimHei
+    latin: Times New Roman
+    size_pt: 15
+    weight: bold
+  body_font:
+    chinese: SimSun
+    latin: Times New Roman
+    size_pt: 10.5
+    weight: normal
+table:
+  caption:
+    position: above
+    prefix: 表
+    font:
+      chinese: SimSun
+      latin: Times New Roman
+      size_pt: 10.5
+      weight: normal
+figure:
+  caption:
+    position: below
+    prefix: 图
+    font:
+      chinese: SimSun
+      latin: Times New Roman
+      size_pt: 10.5
+      weight: normal
+equations:
+  alignment: center
+  numbering: right
+  font: Cambria Math
+references:
+  style: GB/T 7714
+  font:
+    chinese: SimSun
+    latin: Times New Roman
+    size_pt: 10.5
+    weight: normal
+  hanging_indent_chars: 2
+quality:
+  check_margins: true
+  check_fonts: true
+  check_line_spacing: true
+  check_headings: true
+  check_references: true
+  strictness: standard
