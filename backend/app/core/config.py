@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Word Format Agent"
     api_prefix: str = "/api"
+    cors_origins: list[str] = Field(default=["http://127.0.0.1:5173", "http://localhost:5173"], alias="CORS_ORIGINS")
     file_storage_root: Path = Field(default=Path("../storage"), alias="FILE_STORAGE_ROOT")
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
     redis_url: str | None = Field(default=None, alias="REDIS_URL")

@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.files import build_files_router
 from app.api.jobs import build_jobs_router
@@ -10,6 +11,13 @@ from app.storage.repository import JsonMetadataRepository
 def create_app(settings: Settings | None = None) -> FastAPI:
     app_settings = settings or get_settings()
     app = FastAPI(title=app_settings.app_name)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=app_settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     repository = JsonMetadataRepository(app_settings.file_storage_root / "metadata.json")
     file_storage = LocalFileStorage(app_settings.file_storage_root)
 

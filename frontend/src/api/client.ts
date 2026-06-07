@@ -46,6 +46,14 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 export const apiClient = {
   baseUrl: API_BASE_URL,
   getHealth: () => requestJson<ServiceHealth>("/health"),
+  uploadFile: (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    return requestJson<FileRecord>("/files", {
+      method: "POST",
+      body: formData,
+    });
+  },
   getFile: (fileId: string) => requestJson<FileRecord>(`/files/${fileId}`),
   getJob: (jobId: string) => requestJson<JobRecord>(`/jobs/${jobId}`),
 };
