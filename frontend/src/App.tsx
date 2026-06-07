@@ -13,6 +13,8 @@ import { FormEvent, useEffect, useState } from "react";
 import {
   apiClient,
   FileRecord,
+  FixLoopRecord,
+  FixPlan,
   FormatProfile,
   JobRecord,
   ProfileExtractionRecord,
@@ -126,6 +128,10 @@ function App() {
   const [outputError, setOutputError] = useState<string | null>(null);
   const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
   const [qualityError, setQualityError] = useState<string | null>(null);
+  const [fixPlan, setFixPlan] = useState<FixPlan | null>(null);
+  const [fixLoop, setFixLoop] = useState<FixLoopRecord | null>(null);
+  const [fixPlanError, setFixPlanError] = useState<string | null>(null);
+  const [selectedFixIssueIds, setSelectedFixIssueIds] = useState<string[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -134,6 +140,8 @@ function App() {
   const [isLoadingOutputs, setIsLoadingOutputs] = useState(false);
   const [isCreatingQualityReport, setIsCreatingQualityReport] = useState(false);
   const [isRefreshingQualityReport, setIsRefreshingQualityReport] = useState(false);
+  const [isCreatingFixPlan, setIsCreatingFixPlan] = useState(false);
+  const [isConfirmingFixLoop, setIsConfirmingFixLoop] = useState(false);
   const outputFileIdsKey = job?.output_file_ids.join("|") ?? "";
 
   useEffect(() => {
@@ -404,6 +412,10 @@ function App() {
       setOutputError(null);
       setQualityReport(null);
       setQualityError(null);
+      setFixPlan(null);
+      setFixLoop(null);
+      setFixPlanError(null);
+      setSelectedFixIssueIds([]);
       setJobError(null);
     } catch (error) {
       setUploadedFile(null);
@@ -434,6 +446,10 @@ function App() {
       setOutputError(null);
       setQualityReport(null);
       setQualityError(null);
+      setFixPlan(null);
+      setFixLoop(null);
+      setFixPlanError(null);
+      setSelectedFixIssueIds([]);
     } catch (error) {
       setJobError(error instanceof Error ? error.message : "创建任务失败。");
     } finally {
@@ -477,6 +493,10 @@ function App() {
         job_id: job.job_id,
       });
       setQualityReport(report);
+      setFixPlan(null);
+      setFixLoop(null);
+      setFixPlanError(null);
+      setSelectedFixIssueIds([]);
     } catch (error) {
       setQualityError(error instanceof Error ? error.message : "质量报告生成失败。");
     } finally {
@@ -499,8 +519,68 @@ function App() {
     }
   };
 
+  const createFixPlan = async () => {
+    if (!qualityReport) {
+      setFixPlanError("请先生成质量报告。");
+      return;
+    }
+    setIsCreatingFixPlan(true);
+    setFixPlanError(null);
+    setFixLoop(null);
+    setSelectedFixIssueIds([]);
+    try {
+      setFixPlan(await apiClient.createFixPlan(qualityReport.report_id));
+    } catch (error) {
+      setFixPlanError(error instanceof Error ? error.message : "修复计划生成失败。");
+    } finally {
+      setIsCreatingFixPlan(false);
+    }
+  };
+
+  const toggleSelectedFixIssue = (issueId: string) => {
+    setSelectedFixIssueIds((current) =>
+      current.includes(issueId) ? current.filter((item) => item !== issueId) : [...current, issueId],
+    );
+    setFixPlanError(null);
+  };
+
+  const selectAllFixableIssues = () => {
+    if (!fixPlan) {
+      return;
+    }
+    const fixableIssueIds = Array.from(new Set(fixPlan.actions.flatMap((action) => action.target_issue_ids)));
+    setSelectedFixIssueIds(fixableIssueIds);
+    setFixPlanError(null);
+  };
+
+  const confirmFixLoop = async () => {
+    if (!qualityReport || !fixPlan) {
+      setFixPlanError("请先生成质量报告和修复计划。");
+      return;
+    }
+    if (selectedFixIssueIds.length === 0) {
+      setFixPlanError("请先选择至少一个可自动修复的问题。");
+      return;
+    }
+    setIsConfirmingFixLoop(true);
+    setFixPlanError(null);
+    try {
+      setFixLoop(
+        await apiClient.confirmFixLoop(qualityReport.report_id, {
+          fix_plan_id: fixPlan.fix_plan_id,
+          selected_issue_ids: selectedFixIssueIds,
+        }),
+      );
+    } catch (error) {
+      setFixPlanError(error instanceof Error ? error.message : "确认修复计划失败。");
+    } finally {
+      setIsConfirmingFixLoop(false);
+    }
+  };
+
   const qualityReportReady = Boolean(job?.profile_id && job.profile_version && job.output_file_ids.length > 0);
   const qualityRemainingCount = qualityReport?.summary.remaining_issue_count ?? 0;
+  const fixableIssueIds = fixPlan ? Array.from(new Set(fixPlan.actions.flatMap((action) => action.target_issue_ids))) : [];
   const qualityVerdict =
     qualityReport && qualityRemainingCount === 0 && qualityReport.summary.all_compliant
       ? "全部合规"
@@ -1268,6 +1348,150 @@ function App() {
                                 );
                               })}
                             </div>
+                            <section className="fix-plan-panel" aria-label="Agent 修复计划">
+                              <div className="quality-header">
+                                <div>
+                                  <p className="eyebrow">Agent Fix Plan</p>
+                                  <h3>修复计划审阅</h3>
+                                </div>
+                                {fixLoop && <span className={`status-badge ${fixLoop.status}`}>{fixLoop.status}</span>}
+                              </div>
+                              <div className="job-actions">
+                                <button
+                                  type="button"
+                                  onClick={createFixPlan}
+                                  disabled={!qualityReport || isCreatingFixPlan}
+                                >
+                                  <ClipboardCheck size={18} aria-hidden="true" />
+                                  {isCreatingFixPlan ? "生成中" : "生成修复计划"}
+                                </button>
+                                <button
+                                  type="button"
+                                  className="ghost-button"
+                                  onClick={selectAllFixableIssues}
+                                  disabled={!fixPlan || fixableIssueIds.length === 0}
+                                >
+                                  选择可自动修复项
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={confirmFixLoop}
+                                  disabled={!fixPlan || selectedFixIssueIds.length === 0 || isConfirmingFixLoop}
+                                >
+                                  <Save size={18} aria-hidden="true" />
+                                  {isConfirmingFixLoop ? "确认中" : "确认所选修复"}
+                                </button>
+                              </div>
+                              <p className="muted">
+                                查看计划不会执行修复；只有确认所选问题后才会创建 fix-loop 记录。
+                              </p>
+                              {fixPlanError && <p className="error-text">{fixPlanError}</p>}
+                              {fixPlan && (
+                                <div className="fix-plan-detail">
+                                  <dl className="quality-meta">
+                                    <div>
+                                      <dt>fix_plan_id</dt>
+                                      <dd>{fixPlan.fix_plan_id}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>需要确认</dt>
+                                      <dd>{fixPlan.requires_user_confirmation ? "yes" : "no"}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>自动动作</dt>
+                                      <dd>{fixPlan.actions.length}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>人工复核</dt>
+                                      <dd>{fixPlan.manual_review_issue_ids.length}</dd>
+                                    </div>
+                                  </dl>
+                                  {fixPlan.explanation && <p className="fix-plan-note">{fixPlan.explanation}</p>}
+                                  <section className="fix-plan-block" aria-label="问题解释">
+                                    <h4>问题解释</h4>
+                                    <div className="fix-explanation-list">
+                                      {fixPlan.explanations.length === 0 ? (
+                                        <p className="muted">当前报告没有需要解释的问题。</p>
+                                      ) : (
+                                        fixPlan.explanations.map((item) => (
+                                          <article className="quality-issue" key={item.issue_id}>
+                                            <div>
+                                              <strong>{item.issue_id}</strong>
+                                              <span
+                                                className={`severity-badge ${
+                                                  item.automatic_repair_allowed ? "low" : "medium"
+                                                }`}
+                                              >
+                                                {item.automatic_repair_allowed ? "auto allowed" : "manual"}
+                                              </span>
+                                            </div>
+                                            <p>{item.reason}</p>
+                                            <small>{item.impact}</small>
+                                            <small>{item.manual_review_guidance}</small>
+                                          </article>
+                                        ))
+                                      )}
+                                    </div>
+                                  </section>
+                                  <section className="fix-plan-block" aria-label="可确认修复动作">
+                                    <div className="quality-group-heading">
+                                      <h4>可确认动作</h4>
+                                      <span>{selectedFixIssueIds.length} selected</span>
+                                    </div>
+                                    {fixPlan.actions.length === 0 ? (
+                                      <p className="muted">没有可自动修复动作，需要人工复核。</p>
+                                    ) : (
+                                      <div className="fix-action-list">
+                                        {fixPlan.actions.map((action) => (
+                                          <label className="fix-action-row" key={`${action.action}-${action.target_issue_ids.join("-")}`}>
+                                            <input
+                                              type="checkbox"
+                                              checked={action.target_issue_ids.every((issueId) =>
+                                                selectedFixIssueIds.includes(issueId),
+                                              )}
+                                              onChange={() => action.target_issue_ids.forEach(toggleSelectedFixIssue)}
+                                            />
+                                            <span>
+                                              <strong>{action.action}</strong>
+                                              <small>{action.target_issue_ids.join(", ")}</small>
+                                            </span>
+                                          </label>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </section>
+                                  {fixPlan.manual_review_issue_ids.length > 0 && (
+                                    <section className="manual-review-box" aria-label="人工复核项">
+                                      <strong>人工复核项</strong>
+                                      <p>{fixPlan.manual_review_issue_ids.join(", ")}</p>
+                                    </section>
+                                  )}
+                                </div>
+                              )}
+                              {fixLoop && (
+                                <section className="fix-loop-record" aria-label="修复确认记录">
+                                  <strong>已创建 fix-loop 记录</strong>
+                                  <dl className="quality-meta">
+                                    <div>
+                                      <dt>fix_loop_id</dt>
+                                      <dd>{fixLoop.fix_loop_id}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>original_report</dt>
+                                      <dd>{fixLoop.original_report_id}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>selected</dt>
+                                      <dd>{fixLoop.selected_issue_ids.length}</dd>
+                                    </div>
+                                    <div>
+                                      <dt>new_job</dt>
+                                      <dd>{fixLoop.new_job_id || "pending"}</dd>
+                                    </div>
+                                  </dl>
+                                </section>
+                              )}
+                            </section>
                           </div>
                         )}
                       </section>

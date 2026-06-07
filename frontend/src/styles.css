@@ -684,6 +684,12 @@ p {
   color: #fffdf7;
 }
 
+.job-actions .ghost-button {
+  border: 1px solid #aeb8b2;
+  background: #ffffff;
+  color: #263536;
+}
+
 .job-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
@@ -989,6 +995,87 @@ p {
 
 .severity-badge.high {
   background: #8b2d2d;
+}
+
+.fix-plan-panel {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #d4c7b5;
+  padding-top: 14px;
+}
+
+.fix-plan-detail {
+  display: grid;
+  gap: 12px;
+}
+
+.fix-plan-note {
+  margin-bottom: 0;
+  border-left: 4px solid #3f596a;
+  padding: 8px 10px;
+  background: #f0f6f7;
+  color: #303638;
+}
+
+.fix-plan-block {
+  display: grid;
+  gap: 8px;
+}
+
+.fix-plan-block h4 {
+  margin: 0;
+}
+
+.fix-explanation-list,
+.fix-action-list {
+  display: grid;
+  gap: 8px;
+}
+
+.fix-action-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid #d4c7b5;
+  border-radius: 6px;
+  padding: 10px;
+  background: #fffdf7;
+}
+
+.fix-action-row input {
+  margin-top: 3px;
+}
+
+.fix-action-row span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fix-action-row strong,
+.fix-action-row small,
+.manual-review-box p,
+.fix-loop-record dd {
+  overflow-wrap: anywhere;
+}
+
+.fix-action-row small {
+  color: #686f72;
+}
+
+.manual-review-box,
+.fix-loop-record {
+  display: grid;
+  gap: 8px;
+  border-left: 4px solid #6d4d2f;
+  padding: 9px 10px;
+  background: #f8f1fb;
+}
+
+.manual-review-box p {
+  margin-bottom: 0;
 }
 
 .status-badge {
