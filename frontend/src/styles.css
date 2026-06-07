@@ -511,8 +511,15 @@ p {
   margin-bottom: 0;
 }
 
-.profile-reference {
+.task-context-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.task-reference {
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
@@ -522,16 +529,26 @@ p {
   background: #fffdf7;
 }
 
-.profile-reference span {
+.task-reference span {
   color: #6d4d2f;
   font-size: 0.78rem;
   font-weight: 700;
   text-transform: uppercase;
 }
 
-.profile-reference strong {
+.task-reference strong,
+.task-reference small {
   overflow-wrap: anywhere;
+}
+
+.task-reference strong {
   color: #303638;
+}
+
+.task-reference small {
+  flex-basis: 100%;
+  color: #686f72;
+  font-size: 0.8rem;
 }
 
 .job-actions {
@@ -569,6 +586,23 @@ p {
   margin: 12px 0 0;
 }
 
+.formatting-error {
+  display: grid;
+  gap: 4px;
+  border-left: 4px solid #8b2d2d;
+  padding: 8px 10px;
+  background: #fff4ef;
+  color: #3d3932;
+}
+
+.formatting-error strong {
+  color: #8b2d2d;
+}
+
+.formatting-error p {
+  overflow-wrap: anywhere;
+}
+
 .output-section {
   display: grid;
   gap: 10px;
@@ -602,7 +636,7 @@ p {
 
 .output-list li {
   display: grid;
-  grid-template-columns: minmax(160px, 1.2fr) minmax(92px, auto) minmax(180px, 1fr);
+  grid-template-columns: 62px minmax(160px, 1.2fr) minmax(88px, auto) minmax(180px, 1fr);
   gap: 10px;
   align-items: center;
   min-width: 0;
@@ -613,13 +647,36 @@ p {
 }
 
 .output-list strong,
-.output-list code {
+.output-list code,
+.output-list small {
   overflow-wrap: anywhere;
 }
 
-.output-list span {
+.output-list span:not(.output-kind),
+.output-list small {
   color: #5e5a52;
   font-size: 0.86rem;
+}
+
+.output-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  min-height: 26px;
+  border-radius: 999px;
+  background: #4a4238;
+  color: #fffdf7;
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.output-kind.docx {
+  background: #2f6564;
+}
+
+.output-kind.pdf {
+  background: #8b2d2d;
 }
 
 .output-list code {
@@ -718,6 +775,10 @@ p {
   }
 
   .profile-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .task-context-grid {
     grid-template-columns: 1fr;
   }
 

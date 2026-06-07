@@ -25,7 +25,7 @@ const workbenchAreas = [
   },
   {
     title: "任务",
-    description: "跟踪占位排版任务的生命周期状态。",
+    description: "跟踪文档排版任务的生命周期和输出状态。",
     icon: ListChecks,
   },
   {
@@ -46,6 +46,34 @@ function profileKey(profileId: string, version: string) {
 
 function cloneProfile(profile: FormatProfile): FormatProfile {
   return JSON.parse(JSON.stringify(profile)) as FormatProfile;
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} bytes`;
+  }
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+}
+
+function outputKind(file: FileRecord): string {
+  const lowerName = file.filename.toLowerCase();
+  if (
+    lowerName.endsWith(".docx") ||
+    file.mime_type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  ) {
+    return "DOCX";
+  }
+  if (lowerName.endsWith(".pdf") || file.mime_type === "application/pdf") {
+    return "PDF";
+  }
+  return "FILE";
 }
 
 function App() {
@@ -780,12 +808,20 @@ function App() {
         <section className="job-panel" id="任务" aria-labelledby="job-title">
           <div>
             <p className="eyebrow">Task</p>
-            <h2 id="job-title">占位排版任务</h2>
-            <p>创建任务后会进入 queued 状态，等待后端 placeholder worker 处理。</p>
+            <h2 id="job-title">文档排版任务</h2>
+            <p>创建任务后会进入 queued 状态，等待后端 worker 按所选 profile 生成规范化 DOCX 输出。</p>
           </div>
-          <div className="profile-reference">
-            <span>Profile Reference</span>
-            <strong>{selectedProfile ? `${selectedProfile.id} v${selectedProfile.version}` : "Unprofiled"}</strong>
+          <div className="task-context-grid">
+            <div className="task-reference">
+              <span>Input File</span>
+              <strong>{uploadedFile ? uploadedFile.filename : "No uploaded file"}</strong>
+              {uploadedFile && <small>{uploadedFile.file_id}</small>}
+            </div>
+            <div className="task-reference">
+              <span>Profile Reference</span>
+              <strong>{selectedProfile ? `${selectedProfile.id} v${selectedProfile.version}` : "Unprofiled"}</strong>
+              {selectedProfile && <small>{selectedProfile.name}</small>}
+            </div>
           </div>
           <div className="job-actions">
             <button type="button" onClick={createJob} disabled={!uploadedFile || isCreatingJob}>
@@ -823,13 +859,13 @@ function App() {
                           : "Unprofiled"}
                       </dd>
                     </div>
-                    {job.error_message && (
-                      <div>
-                        <dt>error</dt>
-                        <dd>{job.error_message}</dd>
-                      </div>
-                    )}
                   </dl>
+                  {job.error_message && (
+                    <section className="formatting-error" aria-label="排版失败诊断">
+                      <strong>排版失败诊断</strong>
+                      <p>{job.error_message}</p>
+                    </section>
+                  )}
                   {job.output_file_ids.length > 0 && (
                     <section className="output-section" aria-label="任务输出文件">
                       <div className="output-heading">
@@ -842,9 +878,11 @@ function App() {
                         <ul className="output-list">
                           {outputFiles.map((file) => (
                             <li key={file.file_id}>
+                              <span className={`output-kind ${outputKind(file).toLowerCase()}`}>{outputKind(file)}</span>
                               <strong>{file.filename}</strong>
-                              <span>{file.size} bytes</span>
+                              <span>{formatFileSize(file.size)}</span>
                               <code>{file.file_id}</code>
+                              <small>{file.mime_type}</small>
                             </li>
                           ))}
                         </ul>
