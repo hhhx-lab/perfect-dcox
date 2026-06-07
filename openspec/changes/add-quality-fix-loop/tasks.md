@@ -30,4 +30,4 @@
 ## 6. Documentation and Verification
 
 - [x] 6.1 Update README, backend README, and frontend README for quality reports, Agent fix safety, and verification commands.
-- [ ] 6.2 Run OpenSpec validation, backend tests, frontend build, quality smoke tests, and hardcoded secret scan.
+- [x] 6.2 Run OpenSpec validation, backend tests, frontend build, quality smoke tests, and hardcoded secret scan.
