@@ -1,11 +1,12 @@
 import pytest
 from pydantic import ValidationError
 
-from app.agents.extraction import ExtractionSourceError, resolve_extraction_source
+from app.agents.extraction import ExtractionSourceError, extract_rule_source_text, resolve_extraction_source
 from app.models import ExtractionEvidence, ProfileExtractionRecord, UncertainItem
 from app.models import FileRecord
 from app.profiles.seed import load_builtin_profiles
 from app.storage.repository import JsonMetadataRepository
+from tests.document_fixtures import create_minimal_thesis_docx
 
 
 def test_profile_extraction_record_serializes_review_payload() -> None:
@@ -174,3 +175,37 @@ def test_resolve_document_extraction_source_rejects_missing_or_unsupported_file(
         resolve_extraction_source(repository, file_id="file_missing", natural_language=None)
     with pytest.raises(ExtractionSourceError, match="Only .doc and .docx"):
         resolve_extraction_source(repository, file_id="file_txt", natural_language=None)
+
+
+def test_extract_rule_source_text_from_docx(tmp_path) -> None:
+    docx_path = create_minimal_thesis_docx(tmp_path / "rules.docx")
+    record = FileRecord(
+        file_id="file_rules",
+        filename="rules.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size=docx_path.stat().st_size,
+        sha256="c" * 64,
+        storage_path=str(docx_path),
+    )
+
+    text = extract_rule_source_text(record, tmp_path / "work", soffice_bin=None)
+
+    assert "第一章 绪论" in text
+    assert "Header A" in text
+    assert "Value B" in text
+
+
+def test_extract_rule_source_text_from_doc_requires_soffice(tmp_path) -> None:
+    legacy_doc = tmp_path / "rules.doc"
+    legacy_doc.write_bytes(b"legacy")
+    record = FileRecord(
+        file_id="file_rules",
+        filename="rules.doc",
+        mime_type="application/msword",
+        size=legacy_doc.stat().st_size,
+        sha256="d" * 64,
+        storage_path=str(legacy_doc),
+    )
+
+    with pytest.raises(ExtractionSourceError, match="SOFFICE_BIN"):
+        extract_rule_source_text(record, tmp_path / "work", soffice_bin=None)
