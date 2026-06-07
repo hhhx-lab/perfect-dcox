@@ -1,14 +1,14 @@
 # Word Format Agent
 
-Word Format Agent 是一个前后端分离的 Word 论文格式规范化工作台。当前仓库已实现基础平台、版本化格式 Profile 和首版 DOCX 格式化引擎：文件上传、文件元数据、带 profile 的排版任务、内置 ECNU 示例 profile、Profile API、结构化编辑器、YAML 导入/导出、DOC/DOCX 输入处理、DOCX 输出登记和前端输出可视化。
+Word Format Agent 是一个前后端分离的 Word 论文格式规范化工作台。当前仓库已实现基础平台、版本化格式 Profile、首版 DOCX 格式化引擎和受限 Agent 规则抽取流程：文件上传、文件元数据、带 profile 的排版任务、内置 ECNU 示例 profile、Profile API、结构化编辑器、YAML 导入/导出、DOC/DOCX 输入处理、DOCX 输出登记、前端输出可视化、profile extraction API 和规则抽取 review 面板。
 
-当前阶段不包含 Agent 规则抽取、自动质检修正循环或文件下载接口。带 `profile_id + profile_version` 的任务会由 worker 调用文档引擎生成规范化 DOCX；未带 profile 的任务仍走兼容的 placeholder 完成路径。PDF 导出已经在 service 层实现，当前任务 API 默认只登记 DOCX 输出，PDF 可通过 service/测试路径验证。
+当前阶段不包含自动质检修正循环、文件下载接口或真实在线 LLM 调用实现。带 `profile_id + profile_version` 的任务会由 worker 调用文档引擎生成规范化 DOCX；未带 profile 的任务仍走兼容的 placeholder 完成路径。规则抽取已经有 API、状态记录、schema 校验和前端 review 入口；默认 LLM provider 只做配置检查，测试和 smoke 通过 deterministic provider 验证安全边界。PDF 导出已经在 service 层实现，当前任务 API 默认只登记 DOCX 输出，PDF 可通过 service/测试路径验证。
 
 ## 目录
 
 ```text
-backend/     FastAPI 后端、文件存储、Profile API、任务 API、DOCX 格式化 worker
-frontend/    React + TypeScript + Vite 工作台、Profile 编辑器和任务输出面板
+backend/     FastAPI 后端、文件存储、Profile API、任务 API、DOCX 格式化 worker、规则抽取 API
+frontend/    React + TypeScript + Vite 工作台、Profile 编辑器、规则抽取面板和任务输出面板
 docs/        产品方案
 openspec/    OpenSpec change artifacts
 plan/        MyPlan 需求质量门产物
@@ -27,7 +27,7 @@ storage/     本地上传文件和 metadata.json，运行产物默认不入库
 cp .env.example .env
 ```
 
-本地上传、Profile 和 `.docx` 格式化至少需要保留 `FILE_STORAGE_ROOT=./storage`。处理 legacy `.doc` 输入或导出 PDF 时必须配置 `SOFFICE_BIN`，本机常见路径是 `/opt/homebrew/bin/soffice`。`LLM_API_KEY`、`LLM_MODEL` 仍留给后续 Agent 规则抽取/修正解释阶段使用。
+本地上传、Profile、规则抽取状态记录和 `.docx` 格式化至少需要保留 `FILE_STORAGE_ROOT=./storage`。处理 legacy `.doc` 输入或导出 PDF 时必须配置 `SOFFICE_BIN`，本机常见路径是 `/opt/homebrew/bin/soffice`。`LLM_API_KEY`、`LLM_MODEL` 用于后续接入真实在线 Agent provider；当前默认 provider 在缺少配置时返回可读错误，测试不依赖真实 API Key。
 
 ## 本地启动
 
@@ -75,6 +75,7 @@ OpenSpec 验证：
 
 ```bash
 openspec validate add-docx-formatting-engine --strict --no-interactive
+openspec validate add-agent-rule-extraction --strict --no-interactive
 ```
 
 文档工具链 smoke check：
@@ -97,6 +98,8 @@ codex-pdf-inspect storage/outputs/<generated-file-id>.pdf
 - `POST /api/profiles/{profile_id}/archive`：归档 Profile，保留历史版本。
 - `POST /api/profiles/import`：从 YAML 导入 Profile。
 - `GET /api/profiles/{profile_id}/versions/{version}/export`：导出指定 Profile 版本 YAML。
+- `POST /api/profile-extractions`：从上传的规则 `.doc/.docx` 或自然语言创建 profile extraction job。
+- `GET /api/profile-extractions/{extraction_id}`：读取规则抽取状态、profile draft、uncertain items、evidence 和错误信息。
 - `POST /api/jobs`：基于已上传文件创建 format job，可选传入 `profile_id` 和 `profile_version`；带 profile 的任务由 worker 生成 DOCX 输出。
 - `GET /api/jobs/{job_id}`：读取任务状态。
 
@@ -106,6 +109,14 @@ codex-pdf-inspect storage/outputs/<generated-file-id>.pdf
 - Profile 使用确定性结构化字段，而不是提示词；字段覆盖页面、字体、正文、标题、摘要、图表题注、公式、参考文献和 quality 配置。
 - Web 端 Profile 面板支持列表、详情、常用字段结构化编辑、保存新版本、YAML 导入和 YAML 导出。
 - 历史版本不会被覆盖，排版任务记录中保存具体 `profile_id + profile_version`，格式化 worker 按该版本应用页面、正文、标题、题注、公式、参考文献和基础表格边框规则。
+
+## Agent 规则抽取能力与限制
+
+- 规则抽取 job 支持两类来源：已上传的 `.doc/.docx` 格式要求文档，或用户输入的自然语言规则描述。
+- Agent 输出必须是结构化 JSON/YAML，并包含 `profile_draft`、`uncertain_items` 和 `evidence`；`profile_draft` 必须通过现有 `FormatProfile` schema。
+- 抽取结果不会自动保存或激活为 profile。Web 端只展示 draft、证据和不确定项，用户点击“载入草案”后才能进入现有 Profile 编辑/保存流程。
+- 默认在线 LLM provider 尚未实现真实网络调用；缺少 `LLM_API_KEY` 或 `LLM_MODEL` 会返回可读配置错误。当前测试通过 fake/deterministic provider 覆盖合法输出、非法 JSON/YAML、缺少 evidence、未知字段、非法枚举、缺配置和 ECNU 样本字段。
+- Agent 不允许直接写最终 DOCX、不允许绕过 profile schema、不允许把低置信度或无证据规则静默作为 active profile 使用。
 
 ## 文档引擎能力与限制
 

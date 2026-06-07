@@ -1,6 +1,6 @@
 # Backend
 
-FastAPI backend for the Word Format Agent workbench. It provides file upload metadata, deterministic Profile schema validation, versioned Profile storage, YAML import/export, queued format jobs, and the first DOCX formatting engine.
+FastAPI backend for the Word Format Agent workbench. It provides file upload metadata, deterministic Profile schema validation, versioned Profile storage, YAML import/export, queued format jobs, the first DOCX formatting engine, and bounded profile rule extraction jobs.
 
 ## Install and Run
 
@@ -48,6 +48,26 @@ Required environment:
 - `.doc` conversion: `SOFFICE_BIN` must point to an existing LibreOffice/soffice binary.
 - PDF export: `SOFFICE_BIN` must point to an existing LibreOffice/soffice binary.
 
+## Profile Extraction Agent Boundary
+
+Profile extraction modules live under `app/agents/` and expose a strict boundary:
+
+- `resolve_extraction_source(...)`: accepts either an uploaded `.doc/.docx` rules file or non-empty natural-language rules.
+- `extract_rule_source_text(...)`: extracts `.docx` paragraph/table text and routes legacy `.doc` through the LibreOffice conversion adapter.
+- `RuleExtractionProvider`: narrow provider interface for Agent output; tests inject fake providers instead of calling a live model.
+- `ConfiguredLLMRuleExtractionProvider`: default runtime provider that reads `LLM_API_KEY` and `LLM_MODEL`; it currently returns a readable local-MVP error instead of making network calls.
+- `parse_agent_extraction_output(...)`: accepts structured JSON/YAML only and validates `profile_draft`, `uncertain_items`, and `evidence`.
+- `ProfileExtractionService`: creates queued extraction records, processes provider output, stores completed review payloads, and records failures without creating profiles automatically.
+
+Profile extraction routes:
+
+```text
+POST /api/profile-extractions
+GET  /api/profile-extractions/{extraction_id}
+```
+
+Extraction results are review payloads, not executable profiles. The API never saves a generated profile version by itself; users must confirm through the existing Profile APIs.
+
 ## Profiles
 
 Profile seed data lives in `../profiles/`. On app startup, `profiles/ecnu_thesis.yaml` is loaded and saved into the local JSON metadata repository if version `1.0.0` is not already present.
@@ -91,4 +111,10 @@ Focused document checks:
 
 ```bash
 uv run pytest tests/test_document_engine.py tests/test_document_formatting.py tests/test_document_worker.py
+```
+
+Focused extraction checks:
+
+```bash
+uv run pytest tests/test_profile_extractions.py tests/test_profile_extractions_api.py
 ```
