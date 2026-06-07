@@ -6,6 +6,7 @@ from app.agents.extraction import (
     ExtractionSourceError,
     RuleExtractionProvider,
     extract_rule_source_text,
+    parse_agent_extraction_output,
     resolve_extraction_source,
 )
 from app.core.config import Settings
@@ -259,3 +260,63 @@ def test_fake_rule_extraction_provider_can_be_injected() -> None:
     provider: RuleExtractionProvider = FakeProvider()
 
     assert provider.extract("A4", {"source_type": "natural_language"}) == "natural_language::A4"
+
+
+def test_parse_agent_extraction_output_accepts_valid_json() -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_copy(update={"id": "agent_profile", "status": "draft"})
+    raw_output = {
+        "profile_draft": profile.model_dump(mode="json"),
+        "uncertain_items": [
+            {
+                "field_path": "headings.1.font.size_pt",
+                "message": "标题字号需要确认。",
+                "suggestion": "按小四处理。",
+            }
+        ],
+        "evidence": [
+            {
+                "field_path": "page.size",
+                "source": "document",
+                "quote": "A4",
+                "confidence": 0.94,
+            }
+        ],
+    }
+
+    result = parse_agent_extraction_output(__import__("json").dumps(raw_output, ensure_ascii=False))
+
+    assert result.profile_draft.id == "agent_profile"
+    assert result.uncertain_items[0].field_path == "headings.1.font.size_pt"
+    assert result.evidence[0].quote == "A4"
+
+
+def test_parse_agent_extraction_output_rejects_invalid_json() -> None:
+    with pytest.raises(ExtractionSourceError, match="Agent output must be valid JSON or YAML"):
+        parse_agent_extraction_output("{not json")
+
+
+def test_parse_agent_extraction_output_requires_evidence() -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_dump(mode="json")
+
+    with pytest.raises(ExtractionSourceError, match="evidence"):
+        parse_agent_extraction_output(__import__("json").dumps({"profile_draft": profile, "uncertain_items": []}))
+
+
+def test_parse_agent_extraction_output_rejects_invalid_profile_schema() -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_dump(mode="json")
+    profile["page"]["orientation"] = "diagonal"
+    raw_output = {
+        "profile_draft": profile,
+        "uncertain_items": [],
+        "evidence": [
+            {
+                "field_path": "page.orientation",
+                "source": "document",
+                "quote": "横向",
+                "confidence": 0.4,
+            }
+        ],
+    }
+
+    with pytest.raises(ExtractionSourceError, match="profile_draft"):
+        parse_agent_extraction_output(__import__("json").dumps(raw_output, ensure_ascii=False))

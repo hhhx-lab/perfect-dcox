@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Protocol
 
 from docx import Document
+from pydantic import ValidationError
+import yaml
 
 from app.core.config import Settings
 from app.documents.converter import DocumentConversionError, convert_doc_to_docx
-from app.models import ExtractionSourceType, FileRecord
+from app.models import ExtractionEvidence, ExtractionSourceType, FileRecord, UncertainItem
+from app.profiles.models import FormatProfile
 from app.storage.repository import JsonMetadataRepository
 
 SUPPORTED_RULE_SOURCE_EXTENSIONS = {".doc", ".docx"}
@@ -23,6 +27,13 @@ class ResolvedExtractionSource:
     source_type: ExtractionSourceType
     text: str
     file_record: FileRecord | None = None
+
+
+@dataclass(frozen=True)
+class ParsedAgentExtraction:
+    profile_draft: FormatProfile
+    uncertain_items: list[UncertainItem]
+    evidence: list[ExtractionEvidence]
 
 
 class RuleExtractionProvider(Protocol):
@@ -82,3 +93,31 @@ def extract_rule_source_text(record: FileRecord, work_dir: Path, soffice_bin: st
     if not parts:
         raise ExtractionSourceError("Rule document does not contain extractable text.")
     return "\n".join(parts)
+
+
+def parse_agent_extraction_output(raw_output: str) -> ParsedAgentExtraction:
+    try:
+        parsed = json.loads(raw_output)
+    except json.JSONDecodeError:
+        try:
+            parsed = yaml.safe_load(raw_output)
+        except yaml.YAMLError as exc:
+            raise ExtractionSourceError(f"Agent output must be valid JSON or YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ExtractionSourceError("Agent output must be a structured object.")
+
+    missing = [key for key in ("profile_draft", "uncertain_items", "evidence") if key not in parsed]
+    if missing:
+        raise ExtractionSourceError(f"Agent output missing required section(s): {', '.join(missing)}")
+    try:
+        profile = FormatProfile.model_validate(parsed["profile_draft"])
+    except ValidationError as exc:
+        raise ExtractionSourceError(f"Agent profile_draft failed schema validation: {exc}") from exc
+    try:
+        uncertain_items = [UncertainItem.model_validate(item) for item in parsed["uncertain_items"]]
+        evidence = [ExtractionEvidence.model_validate(item) for item in parsed["evidence"]]
+    except ValidationError as exc:
+        raise ExtractionSourceError(f"Agent review metadata failed validation: {exc}") from exc
+    if not evidence:
+        raise ExtractionSourceError("Agent output evidence must contain at least one item.")
+    return ParsedAgentExtraction(profile_draft=profile, uncertain_items=uncertain_items, evidence=evidence)
