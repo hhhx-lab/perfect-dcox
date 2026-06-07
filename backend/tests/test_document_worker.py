@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.documents.service import DocumentFormattingError, DocumentFormattingService
-from app.jobs.worker import process_placeholder_job
+from app.jobs.worker import process_next_queued_job, process_placeholder_job
 from app.main import create_app
 from app.models import JobRecord
 from app.profiles.seed import load_builtin_profiles
@@ -131,3 +131,57 @@ def test_worker_reports_formatting_failure(tmp_path: Path) -> None:
     assert failed.status == "failed"
     assert failed.progress == 100
     assert "Input file" in (failed.error_message or "")
+
+
+def test_next_queued_job_processes_profiled_formatting_job(tmp_path: Path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    storage = LocalFileStorage(tmp_path)
+    source = create_minimal_thesis_docx(tmp_path / "input.docx")
+    input_record = storage.store_generated_file(
+        source,
+        filename="input.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    repository.add_file(input_record)
+    repository.save_profile_version(load_builtin_profiles()["ecnu_thesis"])
+    repository.add_job(
+        JobRecord(
+            job_id="job_next",
+            job_type="placeholder_format",
+            input_file_id=input_record.file_id,
+            profile_id="ecnu_thesis",
+            profile_version="1.0.0",
+        )
+    )
+
+    completed = process_next_queued_job(repository, storage=storage, soffice_bin=None)
+
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.output_file_ids
+
+
+def test_worker_reports_missing_profile_version(tmp_path: Path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    storage = LocalFileStorage(tmp_path)
+    source = create_minimal_thesis_docx(tmp_path / "input.docx")
+    input_record = storage.store_generated_file(
+        source,
+        filename="input.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    repository.add_file(input_record)
+    job = repository.add_job(
+        JobRecord(
+            job_id="job_missing_profile",
+            job_type="placeholder_format",
+            input_file_id=input_record.file_id,
+            profile_id="missing",
+            profile_version="1.0.0",
+        )
+    )
+
+    failed = process_placeholder_job(repository, job.job_id, storage=storage, soffice_bin=None)
+
+    assert failed.status == "failed"
+    assert "Profile version not found" in (failed.error_message or "")
