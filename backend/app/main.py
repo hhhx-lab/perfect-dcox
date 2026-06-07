@@ -6,8 +6,10 @@ from app.api.files import build_files_router
 from app.api.jobs import build_jobs_router
 from app.api.profile_extractions import build_profile_extractions_router
 from app.api.profiles import build_profiles_router
+from app.api.quality_reports import build_quality_reports_router
 from app.core.config import Settings, get_settings
 from app.profiles.seed import load_builtin_profiles
+from app.quality.service import QualityReportService
 from app.storage.local import LocalFileStorage
 from app.storage.repository import JsonMetadataRepository
 
@@ -30,6 +32,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app_settings.soffice_bin,
         ConfiguredLLMRuleExtractionProvider(app_settings),
     )
+    quality_report_service = QualityReportService(repository)
     for profile in load_builtin_profiles().values():
         if repository.get_profile_version(profile.id, profile.version) is None:
             repository.save_profile_version(profile)
@@ -51,6 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(build_profiles_router(repository), prefix=app_settings.api_prefix)
     app.include_router(build_jobs_router(repository), prefix=app_settings.api_prefix)
     app.include_router(build_profile_extractions_router(extraction_service), prefix=app_settings.api_prefix)
+    app.include_router(build_quality_reports_router(quality_report_service), prefix=app_settings.api_prefix)
 
     return app
 
