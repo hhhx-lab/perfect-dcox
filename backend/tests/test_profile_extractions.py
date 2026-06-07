@@ -209,3 +209,29 @@ def test_extract_rule_source_text_from_doc_requires_soffice(tmp_path) -> None:
 
     with pytest.raises(ExtractionSourceError, match="SOFFICE_BIN"):
         extract_rule_source_text(record, tmp_path / "work", soffice_bin=None)
+
+
+def test_extract_rule_source_text_from_doc_uses_conversion(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy_doc = tmp_path / "rules.doc"
+    legacy_doc.write_bytes(b"legacy")
+    converted_docx = create_minimal_thesis_docx(tmp_path / "converted.docx")
+    record = FileRecord(
+        file_id="file_rules",
+        filename="rules.doc",
+        mime_type="application/msword",
+        size=legacy_doc.stat().st_size,
+        sha256="e" * 64,
+        storage_path=str(legacy_doc),
+    )
+    calls: list[tuple[object, object, object]] = []
+
+    def fake_convert(input_path, output_dir, soffice_bin):
+        calls.append((input_path, output_dir, soffice_bin))
+        return converted_docx
+
+    monkeypatch.setattr("app.agents.extraction.convert_doc_to_docx", fake_convert)
+
+    text = extract_rule_source_text(record, tmp_path / "work", soffice_bin="/opt/homebrew/bin/soffice")
+
+    assert calls == [(legacy_doc, tmp_path / "work", "/opt/homebrew/bin/soffice")]
+    assert "第一章 绪论" in text
