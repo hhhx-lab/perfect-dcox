@@ -1,7 +1,9 @@
 import pytest
 from pydantic import ValidationError
 
+from app.agents.extraction import ExtractionSourceError, resolve_extraction_source
 from app.models import ExtractionEvidence, ProfileExtractionRecord, UncertainItem
+from app.models import FileRecord
 from app.profiles.seed import load_builtin_profiles
 from app.storage.repository import JsonMetadataRepository
 
@@ -116,3 +118,59 @@ def test_repository_handles_legacy_metadata_without_extraction_jobs(tmp_path) ->
 
     assert repository.list_profile_extractions() == []
     assert repository.get_profile_extraction("extract_missing") is None
+
+
+def test_resolve_natural_language_extraction_source(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+
+    source = resolve_extraction_source(repository, file_id=None, natural_language="  A4, 小四宋体  ")
+
+    assert source.source_type == "natural_language"
+    assert source.text == "A4, 小四宋体"
+    assert source.file_record is None
+
+
+def test_resolve_extraction_source_rejects_empty_request(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+
+    with pytest.raises(ExtractionSourceError, match="Either file_id or natural_language"):
+        resolve_extraction_source(repository, file_id=None, natural_language="  ")
+
+
+def test_resolve_document_extraction_source_validates_file(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    repository.add_file(
+        FileRecord(
+            file_id="file_rules",
+            filename="rules.docx",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size=12,
+            sha256="a" * 64,
+            storage_path=str(tmp_path / "rules.docx"),
+        )
+    )
+
+    source = resolve_extraction_source(repository, file_id="file_rules", natural_language=None)
+
+    assert source.source_type == "document"
+    assert source.file_record is not None
+    assert source.file_record.filename == "rules.docx"
+
+
+def test_resolve_document_extraction_source_rejects_missing_or_unsupported_file(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    repository.add_file(
+        FileRecord(
+            file_id="file_txt",
+            filename="rules.txt",
+            mime_type="text/plain",
+            size=12,
+            sha256="b" * 64,
+            storage_path=str(tmp_path / "rules.txt"),
+        )
+    )
+
+    with pytest.raises(ExtractionSourceError, match="Rule source file not found"):
+        resolve_extraction_source(repository, file_id="file_missing", natural_language=None)
+    with pytest.raises(ExtractionSourceError, match="Only .doc and .docx"):
+        resolve_extraction_source(repository, file_id="file_txt", natural_language=None)
