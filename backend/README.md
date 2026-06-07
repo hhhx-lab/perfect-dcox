@@ -1,6 +1,6 @@
 # Backend
 
-FastAPI backend for the Word Format Agent workbench. It provides file upload metadata, deterministic Profile schema validation, versioned Profile storage, YAML import/export, queued format jobs, the first DOCX formatting engine, and bounded profile rule extraction jobs.
+FastAPI backend for the Word Format Agent workbench. It provides file upload metadata, deterministic Profile schema validation, versioned Profile storage, YAML import/export, queued format jobs, the first DOCX formatting engine, bounded profile rule extraction jobs, structured quality reports, and user-confirmed fix-loop lineage records.
 
 ## Install and Run
 
@@ -68,6 +68,58 @@ GET  /api/profile-extractions/{extraction_id}
 
 Extraction results are review payloads, not executable profiles. The API never saves a generated profile version by itself; users must confirm through the existing Profile APIs.
 
+## Quality Reports and Fix Plans
+
+Quality modules live under `app/quality/`:
+
+- `inspection.py`: performs local DOCX/PDF checks and returns `QualityIssue` records.
+- `service.py`: resolves output files and profile versions, runs inspection, builds `QualityReport`, computes summary counts, and persists reports.
+- `fix_planning.py`: creates deterministic Agent-style explanations and validates whitelisted `FixPlan` actions.
+
+DOCX quality inspection currently checks:
+
+- page margins against `profile.page.margins_cm`
+- representative body paragraph indent, line spacing, and font
+- representative level-one heading style
+- basic table border presence
+- table/figure caption text
+- raw LaTeX residue such as `$...$`
+- page-number support as an explicit `unsupported` item
+
+PDF quality inspection is lightweight and byte-level: it checks a readable PDF envelope, page count, literal text extractability, and an obvious blank/image-only warning. When the checker cannot judge a feature safely, it records `fail` or `unsupported` with a readable diagnostic instead of returning `pass`.
+
+Quality report routes:
+
+```text
+POST /api/quality-reports
+GET  /api/quality-reports/{report_id}
+POST /api/quality-reports/{report_id}/fix-plan
+POST /api/quality-reports/{report_id}/fix-loops
+```
+
+`POST /api/quality-reports` requires a profile reference and at least one output file id:
+
+```json
+{
+  "profile_id": "ecnu_thesis",
+  "profile_version": "1.0.0",
+  "output_file_ids": ["file_xxx"],
+  "job_id": "job_optional"
+}
+```
+
+Reports include `summary.counts`, `summary.remaining_issue_count`, `summary.all_compliant`, flat `issues`, and grouped `issues_by_status` for `pass/fixed/warning/fail/unsupported`. A completed formatting job is not treated as proof of compliance; warning, fail, and unsupported issues remain visible.
+
+Fix planning is intentionally constrained. The deterministic planner only considers warning/fail/unsupported issues, explains each issue, and emits whitelisted actions:
+
+- `reapply_profile_formatting`
+- `apply_table_borders`
+- `apply_body_paragraph_style`
+- `apply_heading_style`
+- `mark_manual_review`
+
+The validator rejects unknown actions, semantic/content edit actions, actions without target issues, unknown target issue ids, and actions that do not require user confirmation. `POST /api/quality-reports/{report_id}/fix-loops` currently creates and persists a `FixLoopRecord` with original report id, fix plan id, selected issue ids, selected actions, and `confirmed` status. The MVP does not yet mutate files, enqueue a real second-pass worker job, or create an updated report automatically.
+
 ## Profiles
 
 Profile seed data lives in `../profiles/`. On app startup, `profiles/ecnu_thesis.yaml` is loaded and saved into the local JSON metadata repository if version `1.0.0` is not already present.
@@ -117,4 +169,10 @@ Focused extraction checks:
 
 ```bash
 uv run pytest tests/test_profile_extractions.py tests/test_profile_extractions_api.py
+```
+
+Focused quality checks:
+
+```bash
+uv run pytest tests/test_quality_reports.py tests/test_quality_reports_api.py
 ```

@@ -1,14 +1,14 @@
 # Word Format Agent
 
-Word Format Agent 是一个前后端分离的 Word 论文格式规范化工作台。当前仓库已实现基础平台、版本化格式 Profile、首版 DOCX 格式化引擎和受限 Agent 规则抽取流程：文件上传、文件元数据、带 profile 的排版任务、内置 ECNU 示例 profile、Profile API、结构化编辑器、YAML 导入/导出、DOC/DOCX 输入处理、DOCX 输出登记、前端输出可视化、profile extraction API 和规则抽取 review 面板。
+Word Format Agent 是一个前后端分离的 Word 论文格式规范化工作台。当前仓库已实现基础平台、版本化格式 Profile、首版 DOCX 格式化引擎、受限 Agent 规则抽取流程、结构化质量报告和用户确认的修复闭环入口：文件上传、文件元数据、带 profile 的排版任务、内置 ECNU 示例 profile、Profile API、结构化编辑器、YAML 导入/导出、DOC/DOCX 输入处理、DOCX 输出登记、前端输出可视化、profile extraction API、规则抽取 review 面板、quality report API 和 Agent fix-plan 审阅控件。
 
-当前阶段不包含自动质检修正循环、文件下载接口或真实在线 LLM 调用实现。带 `profile_id + profile_version` 的任务会由 worker 调用文档引擎生成规范化 DOCX；未带 profile 的任务仍走兼容的 placeholder 完成路径。规则抽取已经有 API、状态记录、schema 校验和前端 review 入口；默认 LLM provider 只做配置检查，测试和 smoke 通过 deterministic provider 验证安全边界。PDF 导出已经在 service 层实现，当前任务 API 默认只登记 DOCX 输出，PDF 可通过 service/测试路径验证。
+当前阶段不包含文件下载接口、真实在线 LLM 调用实现或真正改写文件的二次修复 worker。带 `profile_id + profile_version` 的任务会由 worker 调用文档引擎生成规范化 DOCX；未带 profile 的任务仍走兼容的 placeholder 完成路径。规则抽取已经有 API、状态记录、schema 校验和前端 review 入口；默认 LLM provider 只做配置检查，测试和 smoke 通过 deterministic provider 验证安全边界。质量报告会独立检查已生成输出并分组展示 `pass/fixed/warning/fail/unsupported`；Agent fix-plan 只生成可解释、白名单动作，必须由用户确认后才创建 fix-loop lineage 记录。PDF 导出已经在 service 层实现，当前任务 API 默认只登记 DOCX 输出，PDF 可通过 service/测试路径验证。
 
 ## 目录
 
 ```text
-backend/     FastAPI 后端、文件存储、Profile API、任务 API、DOCX 格式化 worker、规则抽取 API
-frontend/    React + TypeScript + Vite 工作台、Profile 编辑器、规则抽取面板和任务输出面板
+backend/     FastAPI 后端、文件存储、Profile API、任务 API、DOCX 格式化 worker、规则抽取 API、质量报告 API
+frontend/    React + TypeScript + Vite 工作台、Profile 编辑器、规则抽取面板、任务输出面板和质量报告面板
 docs/        产品方案
 openspec/    OpenSpec change artifacts
 plan/        MyPlan 需求质量门产物
@@ -76,6 +76,7 @@ OpenSpec 验证：
 ```bash
 openspec validate add-docx-formatting-engine --strict --no-interactive
 openspec validate add-agent-rule-extraction --strict --no-interactive
+openspec validate add-quality-fix-loop --strict --no-interactive
 ```
 
 文档工具链 smoke check：
@@ -102,6 +103,10 @@ codex-pdf-inspect storage/outputs/<generated-file-id>.pdf
 - `GET /api/profile-extractions/{extraction_id}`：读取规则抽取状态、profile draft、uncertain items、evidence 和错误信息。
 - `POST /api/jobs`：基于已上传文件创建 format job，可选传入 `profile_id` 和 `profile_version`；带 profile 的任务由 worker 生成 DOCX 输出。
 - `GET /api/jobs/{job_id}`：读取任务状态。
+- `POST /api/quality-reports`：对已生成输出文件按指定 profile 创建结构化质量报告。
+- `GET /api/quality-reports/{report_id}`：读取质量报告、summary counts、issue list 和 `issues_by_status`。
+- `POST /api/quality-reports/{report_id}/fix-plan`：为 warning/fail/unsupported issue 生成 deterministic Agent fix-plan。
+- `POST /api/quality-reports/{report_id}/fix-loops`：用户确认选中的 issue 后创建 fix-loop lineage 记录；当前不直接改写输出文件。
 
 ## Profile 工作流
 
@@ -117,6 +122,15 @@ codex-pdf-inspect storage/outputs/<generated-file-id>.pdf
 - 抽取结果不会自动保存或激活为 profile。Web 端只展示 draft、证据和不确定项，用户点击“载入草案”后才能进入现有 Profile 编辑/保存流程。
 - 默认在线 LLM provider 尚未实现真实网络调用；缺少 `LLM_API_KEY` 或 `LLM_MODEL` 会返回可读配置错误。当前测试通过 fake/deterministic provider 覆盖合法输出、非法 JSON/YAML、缺少 evidence、未知字段、非法枚举、缺配置和 ECNU 样本字段。
 - Agent 不允许直接写最终 DOCX、不允许绕过 profile schema、不允许把低置信度或无证据规则静默作为 active profile 使用。
+
+## 质量报告与 Agent 修复闭环
+
+- 质量报告由 `POST /api/quality-reports` 用户触发，读取已有 `FileRecord` 输出和指定 `profile_id + profile_version`，不把 job `completed` 状态等同于完全合规。
+- DOCX 检查覆盖页边距、正文段落样式、标题样式、基础三线表边框、图表题注、原始 LaTeX 残留和页码检查能力边界；无法可靠判断的项目会保留为 `unsupported`，不会静默标记为 `pass`。
+- PDF 检查覆盖 PDF envelope、页数大于零、基础文本可抽取性和明显空白页警告；轻量检查无法确认时返回 `fail` 或 `unsupported` 并给出可读诊断。
+- 报告 summary 使用 `pass`、`fixed`、`warning`、`fail`、`unsupported` 五类计数；只要仍有 `warning/fail/unsupported`，前端就显示剩余问题摘要，不展示“全部合规”。
+- Agent fix-plan 当前是 deterministic fallback：只解释 warning/fail/unsupported issue，并只允许白名单格式动作 `reapply_profile_formatting`、`apply_table_borders`、`apply_body_paragraph_style`、`apply_heading_style`、`mark_manual_review`。
+- 查看 fix-plan 不会执行修复。用户必须在前端选择 issue 并点击确认，后端才会创建 `FixLoopRecord`，记录 original report、fix plan、selected issue/action 和状态。当前 MVP 不会直接生成新 job、新输出或 updated report。
 
 ## 文档引擎能力与限制
 
