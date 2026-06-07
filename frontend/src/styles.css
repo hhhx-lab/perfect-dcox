@@ -497,6 +497,120 @@ p {
   line-height: 1.55;
 }
 
+.extraction-panel {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 24px;
+  border: 1px solid #cbd6d2;
+  border-radius: 8px;
+  padding: 18px;
+  background: #f8fbf5;
+}
+
+.extraction-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.extraction-controls label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.extraction-controls label span {
+  color: #485458;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.extraction-controls select,
+.extraction-controls textarea {
+  width: 100%;
+  border: 1px solid #cbd6d2;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #263536;
+}
+
+.extraction-controls select {
+  min-height: 40px;
+  padding: 7px 9px;
+}
+
+.extraction-text textarea {
+  min-height: 96px;
+  resize: vertical;
+  padding: 10px;
+  line-height: 1.55;
+}
+
+.extraction-result {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid #d2ddd7;
+  padding-top: 14px;
+}
+
+.extraction-result dl {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.extraction-result dt {
+  color: #6d4d2f;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.extraction-result dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  color: #303638;
+}
+
+.review-list,
+.evidence-list {
+  display: grid;
+  gap: 8px;
+}
+
+.review-list h3,
+.evidence-list h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.review-list article,
+.evidence-list article {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #d2ddd7;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #ffffff;
+}
+
+.review-list strong,
+.evidence-list strong {
+  overflow-wrap: anywhere;
+  color: #263536;
+}
+
+.review-list p,
+.evidence-list p {
+  margin-bottom: 0;
+}
+
+.review-list small,
+.evidence-list small {
+  overflow-wrap: anywhere;
+  color: #686f72;
+}
+
 .job-panel {
   display: grid;
   gap: 16px;
@@ -775,6 +889,10 @@ p {
   }
 
   .profile-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .extraction-controls {
     grid-template-columns: 1fr;
   }
 

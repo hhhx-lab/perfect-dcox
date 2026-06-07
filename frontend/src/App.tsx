@@ -10,7 +10,15 @@ import {
   Upload,
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import { apiClient, FileRecord, FormatProfile, JobRecord, ProfileSummary, ServiceHealth } from "./api/client";
+import {
+  apiClient,
+  FileRecord,
+  FormatProfile,
+  JobRecord,
+  ProfileExtractionRecord,
+  ProfileSummary,
+  ServiceHealth,
+} from "./api/client";
 
 const workbenchAreas = [
   {
@@ -24,14 +32,14 @@ const workbenchAreas = [
     icon: FileText,
   },
   {
+    title: "规则抽取",
+    description: "从规则文档或自然语言生成可确认的 profile 草案。",
+    icon: ClipboardCheck,
+  },
+  {
     title: "任务",
     description: "跟踪文档排版任务的生命周期和输出状态。",
     icon: ListChecks,
-  },
-  {
-    title: "质检",
-    description: "后续展示 DOCX/PDF 合规检查结果。",
-    icon: ClipboardCheck,
   },
   {
     title: "输出",
@@ -89,10 +97,16 @@ function App() {
   const [yamlText, setYamlText] = useState("");
   const [yamlError, setYamlError] = useState<string | null>(null);
   const [yamlMessage, setYamlMessage] = useState<string | null>(null);
+  const [extractionSourceMode, setExtractionSourceMode] = useState<"natural_language" | "document">("natural_language");
+  const [extractionText, setExtractionText] = useState("");
+  const [extraction, setExtraction] = useState<ProfileExtractionRecord | null>(null);
+  const [extractionError, setExtractionError] = useState<string | null>(null);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [isImportingYaml, setIsImportingYaml] = useState(false);
   const [isExportingYaml, setIsExportingYaml] = useState(false);
+  const [isCreatingExtraction, setIsCreatingExtraction] = useState(false);
+  const [isRefreshingExtraction, setIsRefreshingExtraction] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadedFile, setUploadedFile] = useState<FileRecord | null>(null);
   const [job, setJob] = useState<JobRecord | null>(null);
@@ -294,6 +308,44 @@ function App() {
       setYamlError(error instanceof Error ? error.message : "导出 YAML 失败。");
     } finally {
       setIsExportingYaml(false);
+    }
+  };
+
+  const createExtraction = async () => {
+    setIsCreatingExtraction(true);
+    setExtractionError(null);
+    try {
+      const created = await apiClient.createProfileExtraction(
+        extractionSourceMode === "document"
+          ? {
+              source_type: "document",
+              file_id: uploadedFile?.file_id ?? null,
+            }
+          : {
+              source_type: "natural_language",
+              natural_language: extractionText,
+            },
+      );
+      setExtraction(created);
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "创建规则抽取任务失败。");
+    } finally {
+      setIsCreatingExtraction(false);
+    }
+  };
+
+  const refreshExtraction = async () => {
+    if (!extraction) {
+      return;
+    }
+    setIsRefreshingExtraction(true);
+    setExtractionError(null);
+    try {
+      setExtraction(await apiClient.getProfileExtraction(extraction.extraction_id));
+    } catch (error) {
+      setExtractionError(error instanceof Error ? error.message : "刷新规则抽取任务失败。");
+    } finally {
+      setIsRefreshingExtraction(false);
     }
   };
 
@@ -803,6 +855,129 @@ function App() {
               aria-label="Profile YAML"
             />
           </section>
+        </section>
+
+        <section className="extraction-panel" id="规则抽取" aria-labelledby="extraction-title">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Agent Extraction</p>
+              <h2 id="extraction-title">规则抽取</h2>
+            </div>
+            {extraction && <span className={`status-badge ${extraction.status}`}>{extraction.status}</span>}
+          </div>
+          <div className="extraction-controls">
+            <label>
+              <span>来源</span>
+              <select
+                value={extractionSourceMode}
+                onChange={(event) => {
+                  setExtractionSourceMode(event.target.value as "natural_language" | "document");
+                  setExtractionError(null);
+                }}
+              >
+                <option value="natural_language">自然语言</option>
+                <option value="document">已上传规则文档</option>
+              </select>
+            </label>
+            {extractionSourceMode === "natural_language" ? (
+              <label className="extraction-text">
+                <span>规则描述</span>
+                <textarea
+                  value={extractionText}
+                  onChange={(event) => {
+                    setExtractionText(event.target.value);
+                    setExtractionError(null);
+                  }}
+                  placeholder="例如：A4，正文宋体小四，英文 Times New Roman，1.5 倍行距，首行缩进 2 字符。"
+                />
+              </label>
+            ) : (
+              <div className="task-reference">
+                <span>Rule File</span>
+                <strong>{uploadedFile ? uploadedFile.filename : "No uploaded file"}</strong>
+                {uploadedFile && <small>{uploadedFile.file_id}</small>}
+              </div>
+            )}
+          </div>
+          <div className="job-actions">
+            <button
+              type="button"
+              onClick={createExtraction}
+              disabled={
+                isCreatingExtraction ||
+                (extractionSourceMode === "document" && !uploadedFile) ||
+                (extractionSourceMode === "natural_language" && !extractionText.trim())
+              }
+            >
+              <ClipboardCheck size={18} aria-hidden="true" />
+              {isCreatingExtraction ? "创建中" : "创建抽取任务"}
+            </button>
+            <button type="button" onClick={refreshExtraction} disabled={!extraction || isRefreshingExtraction}>
+              <RefreshCcw size={18} aria-hidden="true" />
+              {isRefreshingExtraction ? "刷新中" : "刷新结果"}
+            </button>
+          </div>
+          {(extraction || extractionError) && (
+            <div className="extraction-result" aria-live="polite">
+              {extractionError && <p className="error-text">{extractionError}</p>}
+              {extraction && (
+                <>
+                  <dl>
+                    <div>
+                      <dt>extraction_id</dt>
+                      <dd>{extraction.extraction_id}</dd>
+                    </div>
+                    <div>
+                      <dt>source</dt>
+                      <dd>
+                        {extraction.source_type}
+                        {extraction.file_id ? ` · ${extraction.file_id}` : ""}
+                      </dd>
+                    </div>
+                    {extraction.profile_draft && (
+                      <div>
+                        <dt>profile_draft</dt>
+                        <dd>
+                          {extraction.profile_draft.name} · {extraction.profile_draft.id} v
+                          {extraction.profile_draft.version}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                  {extraction.error_message && (
+                    <section className="formatting-error" aria-label="规则抽取失败">
+                      <strong>规则抽取失败</strong>
+                      <p>{extraction.error_message}</p>
+                    </section>
+                  )}
+                  {extraction.uncertain_items.length > 0 && (
+                    <section className="review-list" aria-label="需要确认的规则">
+                      <h3>需要确认</h3>
+                      {extraction.uncertain_items.map((item) => (
+                        <article key={`${item.field_path}-${item.message}`}>
+                          <strong>{item.field_path}</strong>
+                          <p>{item.message}</p>
+                          <small>{item.suggestion}</small>
+                        </article>
+                      ))}
+                    </section>
+                  )}
+                  {extraction.evidence.length > 0 && (
+                    <section className="evidence-list" aria-label="来源证据">
+                      <h3>来源证据</h3>
+                      {extraction.evidence.map((item) => (
+                        <article key={`${item.field_path}-${item.quote ?? item.note ?? item.confidence}`}>
+                          <strong>{item.field_path}</strong>
+                          <p>{item.quote || item.note || "No direct quote"}</p>
+                          <small>{Math.round(item.confidence * 100)}% · {item.source}</small>
+                        </article>
+                      ))}
+                    </section>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </section>
 
         <section className="job-panel" id="任务" aria-labelledby="job-title">
