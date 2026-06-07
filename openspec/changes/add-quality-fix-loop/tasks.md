@@ -24,7 +24,7 @@
 ## 5. Frontend Quality Review
 
 - [x] 5.1 Extend frontend API client types and methods for quality reports, fix plans, and fix loops.
-- [ ] 5.2 Add quality report panel grouped by pass/fixed/warning/fail/unsupported with remaining issue summary.
+- [x] 5.2 Add quality report panel grouped by pass/fixed/warning/fail/unsupported with remaining issue summary.
 - [ ] 5.3 Add fix-plan review and confirmation controls without displaying “全部合规” when unresolved issues remain.
 
 ## 6. Documentation and Verification

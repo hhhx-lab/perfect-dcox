@@ -17,6 +17,8 @@ import {
   JobRecord,
   ProfileExtractionRecord,
   ProfileSummary,
+  QualityReport,
+  QualityStatus,
   ServiceHealth,
 } from "./api/client";
 
@@ -47,6 +49,16 @@ const workbenchAreas = [
     icon: FolderOpen,
   },
 ];
+
+const qualityStatusOrder: QualityStatus[] = ["pass", "fixed", "warning", "fail", "unsupported"];
+
+const qualityStatusLabels: Record<QualityStatus, string> = {
+  pass: "通过",
+  fixed: "已修复",
+  warning: "警告",
+  fail: "失败",
+  unsupported: "无法判断",
+};
 
 function profileKey(profileId: string, version: string) {
   return `${profileId}@${version}`;
@@ -112,12 +124,16 @@ function App() {
   const [job, setJob] = useState<JobRecord | null>(null);
   const [outputFiles, setOutputFiles] = useState<FileRecord[]>([]);
   const [outputError, setOutputError] = useState<string | null>(null);
+  const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
+  const [qualityError, setQualityError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isCreatingJob, setIsCreatingJob] = useState(false);
   const [isRefreshingJob, setIsRefreshingJob] = useState(false);
   const [isLoadingOutputs, setIsLoadingOutputs] = useState(false);
+  const [isCreatingQualityReport, setIsCreatingQualityReport] = useState(false);
+  const [isRefreshingQualityReport, setIsRefreshingQualityReport] = useState(false);
   const outputFileIdsKey = job?.output_file_ids.join("|") ?? "";
 
   useEffect(() => {
@@ -386,6 +402,8 @@ function App() {
       setJob(null);
       setOutputFiles([]);
       setOutputError(null);
+      setQualityReport(null);
+      setQualityError(null);
       setJobError(null);
     } catch (error) {
       setUploadedFile(null);
@@ -414,6 +432,8 @@ function App() {
       setJob(created);
       setOutputFiles([]);
       setOutputError(null);
+      setQualityReport(null);
+      setQualityError(null);
     } catch (error) {
       setJobError(error instanceof Error ? error.message : "创建任务失败。");
     } finally {
@@ -436,6 +456,57 @@ function App() {
       setIsRefreshingJob(false);
     }
   };
+
+  const createQualityReport = async () => {
+    if (!job?.profile_id || !job.profile_version) {
+      setQualityError("当前任务缺少 profile 引用，无法生成质量报告。");
+      return;
+    }
+    if (job.output_file_ids.length === 0) {
+      setQualityError("当前任务还没有输出文件，无法生成质量报告。");
+      return;
+    }
+
+    setIsCreatingQualityReport(true);
+    setQualityError(null);
+    try {
+      const report = await apiClient.createQualityReport({
+        profile_id: job.profile_id,
+        profile_version: job.profile_version,
+        output_file_ids: job.output_file_ids,
+        job_id: job.job_id,
+      });
+      setQualityReport(report);
+    } catch (error) {
+      setQualityError(error instanceof Error ? error.message : "质量报告生成失败。");
+    } finally {
+      setIsCreatingQualityReport(false);
+    }
+  };
+
+  const refreshQualityReport = async () => {
+    if (!qualityReport) {
+      return;
+    }
+    setIsRefreshingQualityReport(true);
+    setQualityError(null);
+    try {
+      setQualityReport(await apiClient.getQualityReport(qualityReport.report_id));
+    } catch (error) {
+      setQualityError(error instanceof Error ? error.message : "质量报告刷新失败。");
+    } finally {
+      setIsRefreshingQualityReport(false);
+    }
+  };
+
+  const qualityReportReady = Boolean(job?.profile_id && job.profile_version && job.output_file_ids.length > 0);
+  const qualityRemainingCount = qualityReport?.summary.remaining_issue_count ?? 0;
+  const qualityVerdict =
+    qualityReport && qualityRemainingCount === 0 && qualityReport.summary.all_compliant
+      ? "全部合规"
+      : qualityReport
+        ? `仍有 ${qualityRemainingCount} 项待处理`
+        : null;
 
   return (
     <main className="workbench">
@@ -1085,6 +1156,121 @@ function App() {
                           ))}
                         </ul>
                       )}
+                      <section className="quality-panel" aria-label="质量报告">
+                        <div className="quality-header">
+                          <div>
+                            <p className="eyebrow">Quality Report</p>
+                            <h3>格式质量报告</h3>
+                          </div>
+                          {qualityVerdict && (
+                            <span
+                              className={`status-badge ${
+                                qualityRemainingCount === 0 && qualityReport?.summary.all_compliant ? "completed" : "warning"
+                              }`}
+                            >
+                              {qualityVerdict}
+                            </span>
+                          )}
+                        </div>
+                        <div className="job-actions">
+                          <button
+                            type="button"
+                            onClick={createQualityReport}
+                            disabled={!qualityReportReady || isCreatingQualityReport}
+                          >
+                            <ClipboardCheck size={18} aria-hidden="true" />
+                            {isCreatingQualityReport ? "生成中" : "生成质量报告"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={refreshQualityReport}
+                            disabled={!qualityReport || isRefreshingQualityReport}
+                          >
+                            <RefreshCcw size={18} aria-hidden="true" />
+                            {isRefreshingQualityReport ? "刷新中" : "刷新报告"}
+                          </button>
+                        </div>
+                        {!qualityReportReady && (
+                          <p className="muted">需要已完成输出文件和 profile 引用后才能生成质量报告。</p>
+                        )}
+                        {qualityError && <p className="error-text">{qualityError}</p>}
+                        {qualityReport && (
+                          <div className="quality-report" aria-live="polite">
+                            <dl className="quality-meta">
+                              <div>
+                                <dt>report_id</dt>
+                                <dd>{qualityReport.report_id}</dd>
+                              </div>
+                              <div>
+                                <dt>profile</dt>
+                                <dd>
+                                  {qualityReport.profile_id} v{qualityReport.profile_version}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>输出文件</dt>
+                                <dd>{qualityReport.output_file_ids.length}</dd>
+                              </div>
+                              <div>
+                                <dt>生成时间</dt>
+                                <dd>{qualityReport.created_at}</dd>
+                              </div>
+                            </dl>
+                            <div className="quality-counts" aria-label="质量状态计数">
+                              {qualityStatusOrder.map((status) => (
+                                <div className={`quality-count ${status}`} key={status}>
+                                  <span>{qualityStatusLabels[status]}</span>
+                                  <strong>{qualityReport.summary.counts[status] ?? 0}</strong>
+                                </div>
+                              ))}
+                            </div>
+                            <div
+                              className={`remaining-summary ${
+                                qualityRemainingCount === 0 && qualityReport.summary.all_compliant ? "clear" : "attention"
+                              }`}
+                            >
+                              <strong>{qualityVerdict}</strong>
+                              <p>
+                                {qualityRemainingCount === 0 && qualityReport.summary.all_compliant
+                                  ? "当前报告没有 warning、fail 或 unsupported 项。"
+                                  : "请优先处理 warning、fail 和 unsupported 项；报告不会把仍有问题的输出标记为完全合规。"}
+                              </p>
+                            </div>
+                            <div className="quality-groups">
+                              {qualityStatusOrder.map((status) => {
+                                const issues =
+                                  qualityReport.issues_by_status[status] ??
+                                  qualityReport.issues.filter((issue) => issue.status === status);
+                                return (
+                                  <section className="quality-group" key={status}>
+                                    <div className="quality-group-heading">
+                                      <h4>{qualityStatusLabels[status]}</h4>
+                                      <span>{issues.length}</span>
+                                    </div>
+                                    {issues.length === 0 ? (
+                                      <p className="muted">暂无该状态的检查项。</p>
+                                    ) : (
+                                      issues.map((issue) => (
+                                        <article className="quality-issue" key={issue.issue_id}>
+                                          <div>
+                                            <strong>{issue.title}</strong>
+                                            <span className={`severity-badge ${issue.severity}`}>{issue.severity}</span>
+                                          </div>
+                                          <p>{issue.description || "无补充说明。"}</p>
+                                          <small>
+                                            {issue.profile_rule_ref || "profile rule N/A"} · {issue.location || "location N/A"}
+                                          </small>
+                                          {issue.recommendation && <small>{issue.recommendation}</small>}
+                                        </article>
+                                      ))
+                                    )}
+                                  </section>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </section>
                     </section>
                   )}
                 </>
