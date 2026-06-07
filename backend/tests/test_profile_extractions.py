@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.models import ExtractionEvidence, ProfileExtractionRecord, UncertainItem
 from app.profiles.seed import load_builtin_profiles
+from app.storage.repository import JsonMetadataRepository
 
 
 def test_profile_extraction_record_serializes_review_payload() -> None:
@@ -44,3 +45,34 @@ def test_profile_extraction_record_serializes_review_payload() -> None:
 def test_profile_extraction_evidence_confidence_is_bounded() -> None:
     with pytest.raises(ValidationError):
         ExtractionEvidence(field_path="page.size", source="document", quote="A4", confidence=1.5)
+
+
+def test_repository_persists_profile_extraction_jobs(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    record = ProfileExtractionRecord(
+        extraction_id="extract_123",
+        source_type="natural_language",
+        natural_language="A4, 宋体小四，1.5 倍行距",
+    )
+
+    repository.add_profile_extraction(record)
+    loaded = repository.get_profile_extraction("extract_123")
+    assert loaded == record
+
+    loaded.status = "failed"
+    loaded.error_message = "LLM output is invalid JSON."
+    updated = repository.update_profile_extraction(loaded)
+
+    reloaded_repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    assert reloaded_repository.get_profile_extraction("extract_123") == updated
+    assert reloaded_repository.list_profile_extractions()[0].error_message == "LLM output is invalid JSON."
+
+
+def test_repository_handles_legacy_metadata_without_extraction_jobs(tmp_path) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text('{"files": {}, "jobs": {}, "profiles": {}, "profile_versions": {}}', encoding="utf-8")
+
+    repository = JsonMetadataRepository(metadata_path)
+
+    assert repository.list_profile_extractions() == []
+    assert repository.get_profile_extraction("extract_missing") is None

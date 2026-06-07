@@ -5,7 +5,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from app.models import FileRecord, JobRecord, utc_now
+from app.models import FileRecord, JobRecord, ProfileExtractionRecord, utc_now
 from app.profiles.models import FormatProfile, ProfileSummary
 
 
@@ -19,7 +19,7 @@ class JsonMetadataRepository:
         self._lock = Lock()
 
     def _empty(self) -> dict[str, dict[str, Any]]:
-        return {"files": {}, "jobs": {}, "profiles": {}, "profile_versions": {}}
+        return {"files": {}, "jobs": {}, "profiles": {}, "profile_versions": {}, "profile_extractions": {}}
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if not self.metadata_path.exists():
@@ -30,6 +30,7 @@ class JsonMetadataRepository:
             "jobs": data.get("jobs", {}),
             "profiles": data.get("profiles", {}),
             "profile_versions": data.get("profile_versions", {}),
+            "profile_extractions": data.get("profile_extractions", {}),
         }
 
     def _save(self, data: dict[str, dict[str, Any]]) -> None:
@@ -75,6 +76,30 @@ class JsonMetadataRepository:
         with self._lock:
             data = self._load()
             data["jobs"][record.job_id] = record.model_dump(mode="json")
+            self._save(data)
+        return record
+
+    def add_profile_extraction(self, record: ProfileExtractionRecord) -> ProfileExtractionRecord:
+        with self._lock:
+            data = self._load()
+            data["profile_extractions"][record.extraction_id] = record.model_dump(mode="json")
+            self._save(data)
+        return record
+
+    def get_profile_extraction(self, extraction_id: str) -> ProfileExtractionRecord | None:
+        data = self._load()
+        raw = data["profile_extractions"].get(extraction_id)
+        return ProfileExtractionRecord.model_validate(raw) if raw else None
+
+    def list_profile_extractions(self) -> list[ProfileExtractionRecord]:
+        data = self._load()
+        return [ProfileExtractionRecord.model_validate(raw) for raw in data["profile_extractions"].values()]
+
+    def update_profile_extraction(self, record: ProfileExtractionRecord) -> ProfileExtractionRecord:
+        record.updated_at = utc_now()
+        with self._lock:
+            data = self._load()
+            data["profile_extractions"][record.extraction_id] = record.model_dump(mode="json")
             self._save(data)
         return record
 
