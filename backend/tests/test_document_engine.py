@@ -6,7 +6,7 @@ import pytest
 from app.documents.converter import DocumentConversionError, convert_doc_to_docx
 from app.documents.exporter import DocumentExportError, export_docx_to_pdf
 from app.documents.formatter import format_docx_with_profile
-from app.documents.parser import parse_docx
+from app.documents.parser import DocumentParseError, parse_docx
 from tests.document_fixtures import create_minimal_thesis_docx, read_docx_text
 
 
@@ -62,3 +62,26 @@ def test_doc_conversion_invokes_soffice_and_returns_docx(tmp_path: Path, monkeyp
     assert calls
     assert "--headless" in calls[0]
     assert "--convert-to" in calls[0]
+
+
+def test_parse_docx_returns_structure_summary(tmp_path: Path) -> None:
+    path = create_minimal_thesis_docx(tmp_path / "sample.docx")
+
+    summary = parse_docx(path)
+
+    assert summary["paragraph_count"] >= 6
+    assert summary["table_count"] == 1
+    assert summary["image_count"] == 0
+    assert "第一章 绪论" in summary["heading_candidates"]
+    assert "这是一段正文内容，用于验证格式化后文本不会丢失。" in summary["all_text"]
+    assert summary["paragraph_styles"]
+
+
+def test_parse_docx_rejects_corrupt_input(tmp_path: Path) -> None:
+    corrupt = tmp_path / "broken.docx"
+    corrupt.write_bytes(b"not a zip")
+
+    with pytest.raises(DocumentParseError) as exc:
+        parse_docx(corrupt)
+
+    assert "DOCX parse failed" in str(exc.value)
