@@ -1,17 +1,18 @@
 # Word Format Agent
 
-Word Format Agent 是一个前后端分离的 Word 论文格式规范化工作台。当前仓库实现的是 MyPipeline `add-web-platform-foundation` 的基础平台阶段：文件上传、文件元数据、占位排版任务、前端工作台和运行配置。
+Word Format Agent 是一个前后端分离的 Word 论文格式规范化工作台。当前仓库已实现基础平台和 MyPipeline `add-profile-management`：文件上传、文件元数据、占位排版任务、版本化格式 Profile、内置 ECNU 示例 profile、Profile API、结构化编辑器和 YAML 导入/导出。
 
-当前阶段不包含真实 DOCX 重排、PDF 转换、Profile 编辑、Agent 规则抽取或质检引擎。这些能力由后续 OpenSpec change 接入。
+当前阶段不包含真实 DOCX 重排、PDF 转换、Agent 规则抽取或质检引擎。占位排版任务可以引用 `profile_id + profile_version`，但 worker 暂不解释格式规则；真实重排由后续 OpenSpec change 接入。
 
 ## 目录
 
 ```text
-backend/     FastAPI 后端、文件存储、任务 API、placeholder worker
-frontend/    React + TypeScript + Vite 工作台
+backend/     FastAPI 后端、文件存储、Profile API、任务 API、placeholder worker
+frontend/    React + TypeScript + Vite 工作台和 Profile 编辑器
 docs/        产品方案
 openspec/    OpenSpec change artifacts
 plan/        MyPlan 需求质量门产物
+profiles/    内置 profile YAML seed，例如 ecnu_thesis.yaml
 issues/      MyPipeline issues CSV 状态源
 storage/     本地上传文件和 metadata.json，运行产物默认不入库
 ```
@@ -26,7 +27,7 @@ storage/     本地上传文件和 metadata.json，运行产物默认不入库
 cp .env.example .env
 ```
 
-Foundation 阶段只需要保留 `FILE_STORAGE_ROOT=./storage` 即可启动基础上传和任务 API。`LLM_API_KEY`、`LLM_MODEL`、`SOFFICE_BIN` 在后续 Agent 和文档转换阶段启用。
+当前阶段只需要保留 `FILE_STORAGE_ROOT=./storage` 即可启动上传、Profile 和任务 API。`LLM_API_KEY`、`LLM_MODEL`、`SOFFICE_BIN` 在后续 Agent 和文档转换阶段启用。
 
 ## 本地启动
 
@@ -71,7 +72,7 @@ npm run build
 OpenSpec 验证：
 
 ```bash
-openspec validate add-web-platform-foundation --strict --no-interactive
+openspec validate add-profile-management --strict --no-interactive
 ```
 
 ## API
@@ -79,8 +80,22 @@ openspec validate add-web-platform-foundation --strict --no-interactive
 - `GET /api/health`：后端健康检查和可选服务配置状态。
 - `POST /api/files`：上传 `.doc` 或 `.docx`。
 - `GET /api/files/{file_id}`：读取文件元数据。
-- `POST /api/jobs`：基于已上传文件创建 placeholder format job。
+- `GET /api/profiles`：读取 Profile 摘要列表。
+- `GET /api/profiles/{profile_id}/versions/{version}`：读取指定 Profile 版本。
+- `POST /api/profiles`：创建新 Profile 的首个版本。
+- `POST /api/profiles/{profile_id}/versions`：保存指定 Profile 的新版本，重复版本会被拒绝。
+- `POST /api/profiles/{profile_id}/archive`：归档 Profile，保留历史版本。
+- `POST /api/profiles/import`：从 YAML 导入 Profile。
+- `GET /api/profiles/{profile_id}/versions/{version}/export`：导出指定 Profile 版本 YAML。
+- `POST /api/jobs`：基于已上传文件创建 placeholder format job，可选传入 `profile_id` 和 `profile_version`。
 - `GET /api/jobs/{job_id}`：读取任务状态。
+
+## Profile 工作流
+
+- 内置 `profiles/ecnu_thesis.yaml` 会在后端启动时写入本地 `metadata.json`，作为 `active` / `system` / `1.0.0` 示例。
+- Profile 使用确定性结构化字段，而不是提示词；字段覆盖页面、字体、正文、标题、摘要、图表题注、公式、参考文献和 quality 配置。
+- Web 端 Profile 面板支持列表、详情、常用字段结构化编辑、保存新版本、YAML 导入和 YAML 导出。
+- 历史版本不会被覆盖，排版任务记录中保存具体 `profile_id + profile_version`，方便后续格式引擎追溯。
 
 ## 安全与提交约定
 
