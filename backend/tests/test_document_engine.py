@@ -64,6 +64,22 @@ def test_doc_conversion_invokes_soffice_and_returns_docx(tmp_path: Path, monkeyp
     assert "--convert-to" in calls[0]
 
 
+def test_docx_input_bypasses_legacy_conversion(tmp_path: Path) -> None:
+    docx = create_minimal_thesis_docx(tmp_path / "sample.docx")
+
+    assert convert_doc_to_docx(docx, tmp_path / "converted", None) == docx
+
+
+def test_doc_conversion_rejects_missing_input(tmp_path: Path) -> None:
+    fake_soffice = tmp_path / "soffice"
+    fake_soffice.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    with pytest.raises(DocumentConversionError) as exc:
+        convert_doc_to_docx(tmp_path / "missing.doc", tmp_path / "converted", str(fake_soffice))
+
+    assert "Input file does not exist" in str(exc.value)
+
+
 def test_parse_docx_returns_structure_summary(tmp_path: Path) -> None:
     path = create_minimal_thesis_docx(tmp_path / "sample.docx")
 
