@@ -13,7 +13,7 @@ from app.models import (
     QualitySummary,
 )
 from app.profiles.seed import load_builtin_profiles
-from app.quality.inspection import inspect_docx_quality
+from app.quality.inspection import inspect_docx_quality, inspect_pdf_quality
 from app.storage.repository import JsonMetadataRepository
 from tests.document_fixtures import create_minimal_thesis_docx
 
@@ -253,3 +253,49 @@ def test_docx_quality_inspection_detects_margin_and_latex_failures(tmp_path) -> 
     assert by_key["docx.page.margins"].profile_rule_ref == "page.margins_cm"
     assert by_key["docx.raw_latex"].status == "fail"
     assert by_key["docx.raw_latex"].location == "paragraph[8]"
+
+
+def test_pdf_quality_inspection_passes_basic_deliverability(tmp_path) -> None:
+    pdf = tmp_path / "deliverable.pdf"
+    pdf.write_bytes(
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >> endobj\n"
+        b"4 0 obj << /Length 48 >> stream\n"
+        b"BT /F1 12 Tf 72 720 Td (Hello thesis text) Tj ET\n"
+        b"endstream endobj\n"
+        b"%%EOF"
+    )
+
+    issues = inspect_pdf_quality(pdf)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["pdf.openability"].status == "pass"
+    assert by_key["pdf.page_count"].status == "pass"
+    assert by_key["pdf.page_count"].details["page_count"] == 1
+    assert by_key["pdf.text_extractability"].status == "pass"
+    assert by_key["pdf.blank_pages"].status == "pass"
+
+
+def test_pdf_quality_inspection_flags_unreadable_and_blank_pdf(tmp_path) -> None:
+    corrupt = tmp_path / "corrupt.pdf"
+    corrupt.write_bytes(b"not a pdf")
+    blank = tmp_path / "blank.pdf"
+    blank.write_bytes(
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >> endobj\n"
+        b"4 0 obj << /Length 0 >> stream\n\nendstream endobj\n"
+        b"%%EOF"
+    )
+
+    corrupt_by_key = {issue.check_key: issue for issue in inspect_pdf_quality(corrupt)}
+    blank_by_key = {issue.check_key: issue for issue in inspect_pdf_quality(blank)}
+
+    assert corrupt_by_key["pdf.openability"].status == "fail"
+    assert corrupt_by_key["pdf.page_count"].status == "fail"
+    assert blank_by_key["pdf.openability"].status == "pass"
+    assert blank_by_key["pdf.text_extractability"].status == "fail"
+    assert blank_by_key["pdf.blank_pages"].status == "warning"

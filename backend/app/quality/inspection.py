@@ -32,6 +32,121 @@ def inspect_docx_quality(path: Path, profile: FormatProfile) -> list[QualityIssu
     ]
 
 
+def inspect_pdf_quality(path: Path) -> list[QualityIssue]:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return [
+            _pdf_openability_issue(False, f"PDF cannot be read from disk: {exc}"),
+            _pdf_page_count_issue(0, readable=False),
+            _pdf_text_extractability_issue(False, readable=False),
+            _pdf_blank_pages_issue(0, has_text=False, readable=False),
+        ]
+
+    readable = data.startswith(b"%PDF") and b"%%EOF" in data[-2048:]
+    page_count = _count_pdf_pages(data) if readable else 0
+    has_text = _pdf_has_literal_text(data) if readable else False
+    return [
+        _pdf_openability_issue(readable, None),
+        _pdf_page_count_issue(page_count, readable=readable),
+        _pdf_text_extractability_issue(has_text, readable=readable),
+        _pdf_blank_pages_issue(page_count, has_text, readable=readable),
+    ]
+
+
+def _pdf_openability_issue(readable: bool, detail: str | None) -> QualityIssue:
+    if readable:
+        return QualityIssue(
+            issue_id="pdf_openability",
+            status="pass",
+            severity="info",
+            check_key="pdf.openability",
+            title="PDF file has a readable PDF envelope.",
+        )
+    return QualityIssue(
+        issue_id="pdf_openability",
+        status="fail",
+        severity="high",
+        check_key="pdf.openability",
+        title="PDF file cannot be opened by the lightweight checker.",
+        description=detail or "The file does not look like a complete PDF.",
+        recommendation="Regenerate the PDF and inspect the export tool logs.",
+        fixable=False,
+    )
+
+
+def _pdf_page_count_issue(page_count: int, readable: bool) -> QualityIssue:
+    if not readable or page_count <= 0:
+        return QualityIssue(
+            issue_id="pdf_page_count",
+            status="fail",
+            severity="high",
+            check_key="pdf.page_count",
+            title="PDF page count could not be confirmed.",
+            description=f"Detected page_count={page_count}.",
+            recommendation="Regenerate the PDF and confirm it contains at least one page.",
+            details={"page_count": page_count},
+            fixable=False,
+        )
+    return QualityIssue(
+        issue_id="pdf_page_count",
+        status="pass",
+        severity="info",
+        check_key="pdf.page_count",
+        title="PDF page count is greater than zero.",
+        details={"page_count": page_count},
+    )
+
+
+def _pdf_text_extractability_issue(has_text: bool, readable: bool) -> QualityIssue:
+    if readable and has_text:
+        return QualityIssue(
+            issue_id="pdf_text_extractability",
+            status="pass",
+            severity="info",
+            check_key="pdf.text_extractability",
+            title="PDF contains extractable literal text.",
+        )
+    return QualityIssue(
+        issue_id="pdf_text_extractability",
+        status="fail",
+        severity="high",
+        check_key="pdf.text_extractability",
+        title="PDF text extractability could not be confirmed.",
+        description="The lightweight checker did not find literal text drawing operators.",
+        recommendation="Inspect the PDF with codex-pdf-inspect or regenerate from DOCX.",
+        fixable=False,
+    )
+
+
+def _pdf_blank_pages_issue(page_count: int, has_text: bool, readable: bool) -> QualityIssue:
+    if not readable:
+        return QualityIssue(
+            issue_id="pdf_blank_pages",
+            status="unsupported",
+            check_key="pdf.blank_pages",
+            title="Blank-page check cannot run because the PDF is unreadable.",
+            recommendation="Regenerate the PDF first.",
+        )
+    if page_count > 0 and not has_text:
+        return QualityIssue(
+            issue_id="pdf_blank_pages",
+            status="warning",
+            check_key="pdf.blank_pages",
+            title="PDF may contain blank or image-only pages.",
+            description="A page was detected, but no literal text was found.",
+            recommendation="Open the PDF and review whether pages are blank or scanned-only.",
+            fixable=False,
+        )
+    return QualityIssue(
+        issue_id="pdf_blank_pages",
+        status="pass",
+        severity="info",
+        check_key="pdf.blank_pages",
+        title="No obvious blank-page warning detected by the lightweight checker.",
+    )
+
+
 def _inspect_margins(document: Document, profile: FormatProfile) -> QualityIssue:
     expected = profile.page.margins_cm
     mismatches: list[str] = []
@@ -67,6 +182,20 @@ def _inspect_margins(document: Document, profile: FormatProfile) -> QualityIssue
         title="DOCX page margins match the profile.",
         profile_rule_ref="page.margins_cm",
     )
+
+
+def _count_pdf_pages(data: bytes) -> int:
+    text = data.decode("latin-1", errors="ignore")
+    type_page_refs = len(re.findall(r"/Type\s*/Page\b", text))
+    if type_page_refs:
+        return type_page_refs
+    count_values = [int(match) for match in re.findall(r"/Count\s+(\d+)", text)]
+    return max(count_values, default=0)
+
+
+def _pdf_has_literal_text(data: bytes) -> bool:
+    text = data.decode("latin-1", errors="ignore")
+    return bool(re.search(r"\([^()]{2,}\)\s*T[Jj]", text) or re.search(r"<[0-9A-Fa-f]{4,}>\s*T[Jj]", text))
 
 
 def _inspect_body_style(document: Document, profile: FormatProfile) -> QualityIssue:
