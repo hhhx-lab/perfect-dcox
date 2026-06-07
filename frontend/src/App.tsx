@@ -58,8 +58,13 @@ function App() {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
   const [profileSaveMessage, setProfileSaveMessage] = useState<string | null>(null);
+  const [yamlText, setYamlText] = useState("");
+  const [yamlError, setYamlError] = useState<string | null>(null);
+  const [yamlMessage, setYamlMessage] = useState<string | null>(null);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [isImportingYaml, setIsImportingYaml] = useState(false);
+  const [isExportingYaml, setIsExportingYaml] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadedFile, setUploadedFile] = useState<FileRecord | null>(null);
   const [job, setJob] = useState<JobRecord | null>(null);
@@ -120,6 +125,7 @@ function App() {
         setProfileError(null);
         setProfileSaveError(null);
         setProfileSaveMessage(null);
+        setYamlError(null);
       })
       .catch((error: Error) => {
         setSelectedProfile(null);
@@ -180,6 +186,47 @@ function App() {
       setProfileSaveError(error instanceof Error ? error.message : "保存 profile 失败。");
     } finally {
       setIsSavingProfile(false);
+    }
+  };
+
+  const importYaml = async () => {
+    if (!yamlText.trim()) {
+      setYamlError("请先粘贴 profile YAML。");
+      return;
+    }
+    setIsImportingYaml(true);
+    setYamlError(null);
+    setYamlMessage(null);
+    try {
+      const imported = await apiClient.importProfileYaml(yamlText);
+      setProfileDraft(cloneProfile(imported));
+      setSelectedProfile(imported);
+      setYamlMessage(`已导入 ${imported.name} v${imported.version}`);
+      await loadProfiles(profileKey(imported.id, imported.version));
+    } catch (error) {
+      setYamlError(error instanceof Error ? error.message : "导入 YAML 失败。");
+    } finally {
+      setIsImportingYaml(false);
+    }
+  };
+
+  const exportYaml = async () => {
+    const source = profileDraft ?? selectedProfile;
+    if (!source) {
+      setYamlError("请先选择一个 profile。");
+      return;
+    }
+    setIsExportingYaml(true);
+    setYamlError(null);
+    setYamlMessage(null);
+    try {
+      const exported = await apiClient.exportProfileYaml(source.id, source.version);
+      setYamlText(exported);
+      setYamlMessage(`已导出 ${source.name} v${source.version}`);
+    } catch (error) {
+      setYamlError(error instanceof Error ? error.message : "导出 YAML 失败。");
+    } finally {
+      setIsExportingYaml(false);
     }
   };
 
@@ -647,6 +694,37 @@ function App() {
               </div>
             </form>
           )}
+          <section className="yaml-panel" aria-labelledby="yaml-title">
+            <div className="editor-header">
+              <div>
+                <p className="eyebrow">YAML</p>
+                <h3 id="yaml-title">高级导入 / 导出</h3>
+              </div>
+              <div className="editor-actions">
+                <button type="button" className="ghost-button" onClick={exportYaml} disabled={isExportingYaml}>
+                  {isExportingYaml ? "导出中" : "导出 YAML"}
+                </button>
+                <button type="button" onClick={importYaml} disabled={isImportingYaml}>
+                  {isImportingYaml ? "导入中" : "导入 YAML"}
+                </button>
+              </div>
+            </div>
+            {(yamlError || yamlMessage) && (
+              <p className={yamlError ? "error-text profile-error" : "success-text"} aria-live="polite">
+                {yamlError || yamlMessage}
+              </p>
+            )}
+            <textarea
+              value={yamlText}
+              onChange={(event) => {
+                setYamlText(event.target.value);
+                setYamlError(null);
+                setYamlMessage(null);
+              }}
+              spellCheck={false}
+              aria-label="Profile YAML"
+            />
+          </section>
         </section>
 
         <section className="job-panel" id="任务" aria-labelledby="job-title">
