@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from docx import Document
 from pydantic import ValidationError
@@ -11,7 +12,7 @@ import yaml
 
 from app.core.config import Settings
 from app.documents.converter import DocumentConversionError, convert_doc_to_docx
-from app.models import ExtractionEvidence, ExtractionSourceType, FileRecord, UncertainItem
+from app.models import ExtractionEvidence, ExtractionSourceType, FileRecord, ProfileExtractionRecord, UncertainItem
 from app.profiles.models import FormatProfile
 from app.storage.repository import JsonMetadataRepository
 
@@ -121,3 +122,69 @@ def parse_agent_extraction_output(raw_output: str) -> ParsedAgentExtraction:
     if not evidence:
         raise ExtractionSourceError("Agent output evidence must contain at least one item.")
     return ParsedAgentExtraction(profile_draft=profile, uncertain_items=uncertain_items, evidence=evidence)
+
+
+class ProfileExtractionService:
+    def __init__(
+        self,
+        repository: JsonMetadataRepository,
+        storage_root: Path,
+        soffice_bin: str | None,
+        provider: RuleExtractionProvider,
+    ) -> None:
+        self.repository = repository
+        self.storage_root = storage_root
+        self.soffice_bin = soffice_bin
+        self.provider = provider
+
+    def create_extraction(self, file_id: str | None, natural_language: str | None) -> ProfileExtractionRecord:
+        source = resolve_extraction_source(self.repository, file_id, natural_language)
+        record = ProfileExtractionRecord(
+            extraction_id=f"extract_{uuid4().hex}",
+            source_type=source.source_type,
+            file_id=source.file_record.file_id if source.file_record else None,
+            natural_language=source.text or None,
+            status="queued",
+        )
+        return self.repository.add_profile_extraction(record)
+
+    def process_extraction(self, extraction_id: str) -> ProfileExtractionRecord:
+        record = self.repository.get_profile_extraction(extraction_id)
+        if record is None:
+            raise ExtractionSourceError(f"Profile extraction job not found: {extraction_id}")
+
+        record.status = "running"
+        record.error_message = None
+        self.repository.update_profile_extraction(record)
+        try:
+            source_text = self._source_text_for_record(record)
+            source_meta = {
+                "source_type": record.source_type,
+                "file_id": record.file_id or "",
+                "extraction_id": record.extraction_id,
+            }
+            raw_output = self.provider.extract(source_text, source_meta)
+            parsed = parse_agent_extraction_output(raw_output)
+        except ExtractionSourceError as exc:
+            record.status = "failed"
+            record.error_message = str(exc)
+            return self.repository.update_profile_extraction(record)
+
+        record.status = "completed"
+        record.profile_draft = parsed.profile_draft
+        record.uncertain_items = parsed.uncertain_items
+        record.evidence = parsed.evidence
+        record.error_message = None
+        return self.repository.update_profile_extraction(record)
+
+    def _source_text_for_record(self, record: ProfileExtractionRecord) -> str:
+        if record.source_type == "natural_language":
+            if not record.natural_language or not record.natural_language.strip():
+                raise ExtractionSourceError("Natural-language extraction source is empty.")
+            return record.natural_language.strip()
+        if not record.file_id:
+            raise ExtractionSourceError("Document extraction source is missing file_id.")
+        file_record = self.repository.get_file(record.file_id)
+        if file_record is None:
+            raise ExtractionSourceError(f"Rule source file not found: {record.file_id}")
+        return extract_rule_source_text(file_record, self.storage_root / "work" / record.extraction_id, self.soffice_bin)

@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from app.agents.extraction import (
     ConfiguredLLMRuleExtractionProvider,
     ExtractionSourceError,
+    ProfileExtractionService,
     RuleExtractionProvider,
     extract_rule_source_text,
     parse_agent_extraction_output,
@@ -320,3 +321,61 @@ def test_parse_agent_extraction_output_rejects_invalid_profile_schema() -> None:
 
     with pytest.raises(ExtractionSourceError, match="profile_draft"):
         parse_agent_extraction_output(__import__("json").dumps(raw_output, ensure_ascii=False))
+
+
+def test_profile_extraction_service_completes_natural_language_job(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_copy(update={"id": "service_draft", "status": "draft"})
+    raw_output = __import__("json").dumps(
+        {
+            "profile_draft": profile.model_dump(mode="json"),
+            "uncertain_items": [
+                {
+                    "field_path": "equations.numbering",
+                    "message": "公式编号需要确认。",
+                    "suggestion": "按右编号处理。",
+                }
+            ],
+            "evidence": [
+                {
+                    "field_path": "page.size",
+                    "source": "natural_language",
+                    "quote": "A4",
+                    "confidence": 0.93,
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    class FakeProvider:
+        def extract(self, source_text: str, source_meta: dict[str, str]) -> str:
+            assert source_text == "A4, 宋体小四"
+            assert source_meta["source_type"] == "natural_language"
+            return raw_output
+
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    service = ProfileExtractionService(repository, tmp_path, soffice_bin=None, provider=FakeProvider())
+    record = service.create_extraction(file_id=None, natural_language="A4, 宋体小四")
+
+    completed = service.process_extraction(record.extraction_id)
+
+    assert completed.status == "completed"
+    assert completed.profile_draft is not None
+    assert completed.profile_draft.id == "service_draft"
+    assert completed.uncertain_items[0].field_path == "equations.numbering"
+    assert repository.get_profile_summary("service_draft") is None
+
+
+def test_profile_extraction_service_records_provider_failure(tmp_path) -> None:
+    class FailingProvider:
+        def extract(self, source_text: str, source_meta: dict[str, str]) -> str:
+            raise ExtractionSourceError("LLM_API_KEY and LLM_MODEL are required for profile extraction.")
+
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    service = ProfileExtractionService(repository, tmp_path, soffice_bin=None, provider=FailingProvider())
+    record = service.create_extraction(file_id=None, natural_language="A4")
+
+    failed = service.process_extraction(record.extraction_id)
+
+    assert failed.status == "failed"
+    assert "LLM_API_KEY" in (failed.error_message or "")
