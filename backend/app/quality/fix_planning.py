@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from app.models import FixAction, FixPlan, IssueExplanation, QualityIssue, QualityReport
 
 
@@ -11,9 +13,18 @@ FIX_ACTION_BY_CHECK_KEY = {
     "docx.heading.style": "apply_heading_style",
     "docx.table.borders": "apply_table_borders",
 }
+UNSAFE_ACTION_HINTS = ("semantic", "formula", "reference", "rewrite", "content")
+WHITELISTED_ACTIONS = set(FIX_ACTION_BY_CHECK_KEY.values()) | {"mark_manual_review"}
+
+
+class FixPlanSafetyError(ValueError):
+    pass
 
 
 class FixPlanService:
+    def __init__(self, llm_configured: bool = False) -> None:
+        self.llm_configured = llm_configured
+
     def create_fix_plan(self, report: QualityReport) -> FixPlan:
         explanations: list[IssueExplanation] = []
         actions: list[FixAction] = []
@@ -46,6 +57,27 @@ class FixPlanService:
             manual_review_issue_ids=manual_review_issue_ids,
             explanation="Deterministic fallback fix plan generated from quality issue metadata.",
         )
+
+
+def validate_fix_plan(plan: FixPlan | dict, known_issue_ids: set[str]) -> FixPlan:
+    try:
+        fix_plan = plan if isinstance(plan, FixPlan) else FixPlan.model_validate(plan)
+    except ValidationError as exc:
+        raise FixPlanSafetyError(f"Fix plan schema validation failed: {exc}") from exc
+
+    for action in fix_plan.actions:
+        if action.action not in WHITELISTED_ACTIONS:
+            raise FixPlanSafetyError(f"Unsafe fix action rejected: {action.action}")
+        if any(hint in action.action for hint in UNSAFE_ACTION_HINTS):
+            raise FixPlanSafetyError(f"Semantic/content fix action rejected: {action.action}")
+        if not action.target_issue_ids:
+            raise FixPlanSafetyError("Fix action must target at least one quality issue.")
+        missing = [issue_id for issue_id in action.target_issue_ids if issue_id not in known_issue_ids]
+        if missing:
+            raise FixPlanSafetyError(f"Fix action targets unknown issue ids: {', '.join(missing)}")
+        if not action.requires_user_confirmation:
+            raise FixPlanSafetyError("Fix action must require user confirmation.")
+    return fix_plan
 
 
 def _explain_issue(issue: QualityIssue, automatic_repair_allowed: bool) -> IssueExplanation:

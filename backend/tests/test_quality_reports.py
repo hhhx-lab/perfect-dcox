@@ -15,7 +15,7 @@ from app.models import (
 )
 from app.profiles.seed import load_builtin_profiles
 from app.quality.inspection import inspect_docx_quality, inspect_pdf_quality
-from app.quality.fix_planning import FixPlanService
+from app.quality.fix_planning import FixPlanSafetyError, FixPlanService, validate_fix_plan
 from app.quality.service import QualityReportService
 from app.storage.repository import JsonMetadataRepository
 from app.storage.local import LocalFileStorage
@@ -396,3 +396,58 @@ def test_fix_plan_service_explains_issues_and_uses_whitelisted_actions() -> None
     assert unsupported.automatic_repair_allowed is False
     assert "cannot judge" in unsupported.manual_review_guidance.lower()
     assert "issue_page_number" in plan.manual_review_issue_ids
+
+
+def test_fix_plan_validation_rejects_unsafe_actions_and_missing_targets() -> None:
+    safe_plan = FixPlan(
+        fix_plan_id="fp_safe",
+        report_id="qr_safe",
+        actions=[FixAction(action="apply_table_borders", target_issue_ids=["issue_table"])],
+    )
+    validate_fix_plan(safe_plan, known_issue_ids={"issue_table"})
+
+    unsafe_payloads = [
+        {"action": "rewrite_thesis_argument", "target_issue_ids": ["issue_table"]},
+        {"action": "edit_formula_content", "target_issue_ids": ["issue_table"]},
+        {"action": "edit_reference_content", "target_issue_ids": ["issue_table"]},
+        {"action": "apply_table_borders", "target_issue_ids": []},
+        {"action": "apply_table_borders", "target_issue_ids": ["missing_issue"]},
+    ]
+    for payload in unsafe_payloads:
+        with pytest.raises(FixPlanSafetyError):
+            validate_fix_plan(
+                {
+                    "fix_plan_id": "fp_unsafe",
+                    "report_id": "qr_safe",
+                    "actions": [payload],
+                },
+                known_issue_ids={"issue_table"},
+            )
+
+
+def test_fix_plan_service_is_deterministic_without_llm_configuration() -> None:
+    report = QualityReport(
+        report_id="qr_no_llm",
+        profile_id="ecnu_thesis",
+        profile_version="1.0.0",
+        output_file_ids=["file_docx"],
+        summary=QualitySummary.from_issues([]),
+        issues=[
+            QualityIssue(
+                issue_id="issue_heading",
+                status="fail",
+                check_key="docx.heading.style",
+                title="Heading style mismatch.",
+                description="Heading alignment is not centered.",
+                profile_rule_ref="headings[1]",
+                fixable=True,
+            )
+        ],
+    )
+    report.summary = QualitySummary.from_issues(report.issues)
+
+    first = FixPlanService(llm_configured=False).create_fix_plan(report)
+    second = FixPlanService(llm_configured=False).create_fix_plan(report)
+
+    assert [action.model_dump() for action in first.actions] == [action.model_dump() for action in second.actions]
+    assert first.explanation == "Deterministic fallback fix plan generated from quality issue metadata."
