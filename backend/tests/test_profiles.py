@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.profiles.models import FormatProfile
-from app.profiles.seed import load_builtin_profiles
+from app.profiles.seed import load_builtin_profiles, profile_to_yaml
 
 
 def valid_profile_payload() -> dict[str, object]:
@@ -180,3 +180,23 @@ def test_ecnu_builtin_profile_is_loaded_from_yaml() -> None:
     assert ecnu.table.caption.position == "above"
     assert ecnu.figure.caption.position == "below"
     assert ecnu.quality.check_fonts is True
+
+
+def test_profile_yaml_round_trip_preserves_validated_fields() -> None:
+    ecnu = load_builtin_profiles()["ecnu_thesis"]
+
+    exported = profile_to_yaml(ecnu)
+    reloaded = FormatProfile.model_validate(__import__("yaml").safe_load(exported))
+
+    assert reloaded == ecnu
+    assert "ecnu_thesis" in exported
+
+
+def test_invalid_character_range_is_rejected() -> None:
+    payload = valid_profile_payload()
+    payload["abstract"]["length_range_chars"] = {"min": 500, "max": 300}  # type: ignore[index]
+
+    with pytest.raises(ValidationError) as exc:
+        FormatProfile.model_validate(payload)
+
+    assert "max must be greater than or equal to min" in str(exc.value)
