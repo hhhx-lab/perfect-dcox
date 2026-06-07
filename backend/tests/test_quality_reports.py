@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from app.documents.formatter import format_docx_with_profile
 from app.models import (
     FixAction,
+    IssueExplanation,
     FixLoopRecord,
     FixPlan,
     QualityIssue,
@@ -14,6 +15,7 @@ from app.models import (
 )
 from app.profiles.seed import load_builtin_profiles
 from app.quality.inspection import inspect_docx_quality, inspect_pdf_quality
+from app.quality.fix_planning import FixPlanService
 from app.quality.service import QualityReportService
 from app.storage.repository import JsonMetadataRepository
 from app.storage.local import LocalFileStorage
@@ -343,3 +345,54 @@ def test_quality_report_service_generates_and_persists_status_summary(tmp_path) 
     assert report.summary.counts["unsupported"] >= 1
     assert report.summary.all_compliant is False
     assert report.issues_by_status["unsupported"][0].check_key == "docx.page_number"
+
+
+def test_fix_plan_service_explains_issues_and_uses_whitelisted_actions() -> None:
+    report = QualityReport(
+        report_id="qr_fixable",
+        job_id="job_quality",
+        profile_id="ecnu_thesis",
+        profile_version="1.0.0",
+        output_file_ids=["file_docx"],
+        summary=QualitySummary.from_issues([]),
+        issues=[
+            QualityIssue(
+                issue_id="issue_body",
+                status="warning",
+                check_key="docx.body.style",
+                title="Body style needs review.",
+                description="Line spacing mismatch.",
+                profile_rule_ref="body",
+                location="paragraph[2]",
+                recommendation="Apply body paragraph style.",
+                fixable=True,
+            ),
+            QualityIssue(
+                issue_id="issue_page_number",
+                status="unsupported",
+                check_key="docx.page_number",
+                title="Page number cannot be judged.",
+                recommendation="Review manually.",
+                fixable=False,
+            ),
+        ],
+    )
+    report.summary = QualitySummary.from_issues(report.issues)
+
+    plan = FixPlanService().create_fix_plan(report)
+
+    assert isinstance(plan.explanations[0], IssueExplanation)
+    assert plan.explanations[0].issue_id == "issue_body"
+    assert plan.explanations[0].automatic_repair_allowed is True
+    assert plan.actions == [
+        FixAction(
+            action="apply_body_paragraph_style",
+            target_issue_ids=["issue_body"],
+            params={"check_key": "docx.body.style", "profile_rule_ref": "body"},
+            requires_user_confirmation=True,
+        )
+    ]
+    unsupported = next(item for item in plan.explanations if item.issue_id == "issue_page_number")
+    assert unsupported.automatic_repair_allowed is False
+    assert "cannot judge" in unsupported.manual_review_guidance.lower()
+    assert "issue_page_number" in plan.manual_review_issue_ids

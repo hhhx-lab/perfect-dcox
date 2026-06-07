@@ -12,7 +12,7 @@
 
 ## 3. Agent Fix Planning
 
-- [ ] 3.1 Implement deterministic issue explanations and whitelisted fix-plan schema validation.
+- [x] 3.1 Implement deterministic issue explanations and whitelisted fix-plan schema validation.
 - [ ] 3.2 Add fix-plan tests for supported actions, unsafe actions, manual-review items, and missing LLM fallback behavior.
 
 ## 4. Quality API

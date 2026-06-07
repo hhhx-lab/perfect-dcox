@@ -152,10 +152,19 @@ class FixAction(BaseModel):
         return self
 
 
+class IssueExplanation(BaseModel):
+    issue_id: str
+    reason: str
+    impact: str
+    automatic_repair_allowed: bool
+    manual_review_guidance: str
+
+
 class FixPlan(BaseModel):
     fix_plan_id: str
     report_id: str
     actions: list[FixAction] = Field(default_factory=list)
+    explanations: list[IssueExplanation] = Field(default_factory=list)
     manual_review_issue_ids: list[str] = Field(default_factory=list)
     explanation: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
