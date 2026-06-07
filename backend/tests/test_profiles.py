@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.profiles.models import FormatProfile
 from app.profiles.seed import load_builtin_profiles, profile_to_yaml
+from app.storage.repository import DuplicateProfileVersionError, JsonMetadataRepository
 
 
 def valid_profile_payload() -> dict[str, object]:
@@ -200,3 +201,43 @@ def test_invalid_character_range_is_rejected() -> None:
         FormatProfile.model_validate(payload)
 
     assert "max must be greater than or equal to min" in str(exc.value)
+
+
+def test_repository_persists_profile_versions_and_rejects_duplicates(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    ecnu = load_builtin_profiles()["ecnu_thesis"]
+    updated = ecnu.model_copy(update={"version": "1.0.1", "name": "ECNU Updated"})
+
+    repository.save_profile_version(ecnu)
+    repository.save_profile_version(updated)
+
+    summaries = repository.list_profiles()
+    assert len(summaries) == 1
+    assert summaries[0].profile_id == "ecnu_thesis"
+    assert summaries[0].current_version == "1.0.1"
+    assert summaries[0].name == "ECNU Updated"
+    assert repository.get_profile_version("ecnu_thesis", "1.0.0") == ecnu
+    assert repository.get_profile_version("ecnu_thesis", "1.0.1") == updated
+
+    with pytest.raises(DuplicateProfileVersionError):
+        repository.save_profile_version(updated)
+
+
+def test_repository_archives_profile_without_deleting_versions(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    ecnu = load_builtin_profiles()["ecnu_thesis"]
+
+    repository.save_profile_version(ecnu)
+    archived = repository.archive_profile("ecnu_thesis")
+
+    assert archived is not None
+    assert archived.status == "archived"
+    assert repository.get_profile_version("ecnu_thesis", "1.0.0") == ecnu
+
+
+def test_repository_handles_legacy_metadata_without_profile_keys(tmp_path) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text('{"files": {}, "jobs": {}}', encoding="utf-8")
+    repository = JsonMetadataRepository(metadata_path)
+
+    assert repository.list_profiles() == []

@@ -6,6 +6,11 @@ from threading import Lock
 from typing import Any
 
 from app.models import FileRecord, JobRecord, utc_now
+from app.profiles.models import FormatProfile, ProfileSummary
+
+
+class DuplicateProfileVersionError(ValueError):
+    pass
 
 
 class JsonMetadataRepository:
@@ -14,7 +19,7 @@ class JsonMetadataRepository:
         self._lock = Lock()
 
     def _empty(self) -> dict[str, dict[str, Any]]:
-        return {"files": {}, "jobs": {}}
+        return {"files": {}, "jobs": {}, "profiles": {}, "profile_versions": {}}
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if not self.metadata_path.exists():
@@ -23,6 +28,8 @@ class JsonMetadataRepository:
         return {
             "files": data.get("files", {}),
             "jobs": data.get("jobs", {}),
+            "profiles": data.get("profiles", {}),
+            "profile_versions": data.get("profile_versions", {}),
         }
 
     def _save(self, data: dict[str, dict[str, Any]]) -> None:
@@ -70,3 +77,54 @@ class JsonMetadataRepository:
             data["jobs"][record.job_id] = record.model_dump(mode="json")
             self._save(data)
         return record
+
+    def list_profiles(self) -> list[ProfileSummary]:
+        data = self._load()
+        return [ProfileSummary.model_validate(raw) for raw in data["profiles"].values()]
+
+    def get_profile_summary(self, profile_id: str) -> ProfileSummary | None:
+        data = self._load()
+        raw = data["profiles"].get(profile_id)
+        return ProfileSummary.model_validate(raw) if raw else None
+
+    def get_profile_version(self, profile_id: str, version: str) -> FormatProfile | None:
+        data = self._load()
+        raw = data["profile_versions"].get(profile_id, {}).get(version)
+        return FormatProfile.model_validate(raw["profile"]) if raw else None
+
+    def save_profile_version(self, profile: FormatProfile) -> FormatProfile:
+        with self._lock:
+            data = self._load()
+            versions = data["profile_versions"].setdefault(profile.id, {})
+            if profile.version in versions:
+                raise DuplicateProfileVersionError(f"Profile {profile.id} version {profile.version} already exists.")
+
+            now = utc_now()
+            versions[profile.version] = {
+                "profile_id": profile.id,
+                "version": profile.version,
+                "profile": profile.model_dump(mode="json"),
+                "created_at": now.isoformat(),
+            }
+            data["profiles"][profile.id] = ProfileSummary(
+                profile_id=profile.id,
+                name=profile.name,
+                status=profile.status,
+                current_version=profile.version,
+                source=profile.source,
+                updated_at=now,
+            ).model_dump(mode="json")
+            self._save(data)
+        return profile
+
+    def archive_profile(self, profile_id: str) -> ProfileSummary | None:
+        with self._lock:
+            data = self._load()
+            raw = data["profiles"].get(profile_id)
+            if raw is None:
+                return None
+            raw["status"] = "archived"
+            raw["updated_at"] = utc_now().isoformat()
+            data["profiles"][profile_id] = raw
+            self._save(data)
+        return ProfileSummary.model_validate(raw)
