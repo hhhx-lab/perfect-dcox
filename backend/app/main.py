@@ -3,7 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.files import build_files_router
 from app.api.jobs import build_jobs_router
+from app.api.profiles import build_profiles_router
 from app.core.config import Settings, get_settings
+from app.profiles.seed import load_builtin_profiles
 from app.storage.local import LocalFileStorage
 from app.storage.repository import JsonMetadataRepository
 
@@ -20,6 +22,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     repository = JsonMetadataRepository(app_settings.file_storage_root / "metadata.json")
     file_storage = LocalFileStorage(app_settings.file_storage_root)
+    for profile in load_builtin_profiles().values():
+        if repository.get_profile_version(profile.id, profile.version) is None:
+            repository.save_profile_version(profile)
 
     @app.get(f"{app_settings.api_prefix}/health")
     def health() -> dict[str, object]:
@@ -35,6 +40,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     app.include_router(build_files_router(repository, file_storage), prefix=app_settings.api_prefix)
+    app.include_router(build_profiles_router(repository), prefix=app_settings.api_prefix)
     app.include_router(build_jobs_router(repository), prefix=app_settings.api_prefix)
 
     return app
