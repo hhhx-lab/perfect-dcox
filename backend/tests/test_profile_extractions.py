@@ -66,6 +66,46 @@ def test_repository_persists_profile_extraction_jobs(tmp_path) -> None:
     reloaded_repository = JsonMetadataRepository(tmp_path / "metadata.json")
     assert reloaded_repository.get_profile_extraction("extract_123") == updated
     assert reloaded_repository.list_profile_extractions()[0].error_message == "LLM output is invalid JSON."
+    assert updated.updated_at >= record.updated_at
+
+
+def test_repository_round_trips_completed_profile_extraction_result(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    profile = load_builtin_profiles()["ecnu_thesis"].model_copy(
+        update={"id": "ecnu_agent_draft", "status": "draft", "source": "imported"}
+    )
+    record = ProfileExtractionRecord(
+        extraction_id="extract_completed",
+        source_type="document",
+        file_id="file_rules",
+        status="completed",
+        profile_draft=profile,
+        uncertain_items=[
+            UncertainItem(
+                field_path="equations.numbering",
+                message="公式编号位置需要确认。",
+                suggestion="沿用右编号。",
+            )
+        ],
+        evidence=[
+            ExtractionEvidence(
+                field_path="body.line_spacing",
+                source="document",
+                quote="行距1.5倍",
+                confidence=0.91,
+            )
+        ],
+    )
+
+    repository.add_profile_extraction(record)
+
+    reloaded = JsonMetadataRepository(tmp_path / "metadata.json").get_profile_extraction("extract_completed")
+    assert reloaded is not None
+    assert reloaded.profile_draft is not None
+    assert reloaded.profile_draft.id == "ecnu_agent_draft"
+    assert reloaded.profile_draft.status == "draft"
+    assert reloaded.uncertain_items[0].field_path == "equations.numbering"
+    assert reloaded.evidence[0].quote == "行距1.5倍"
 
 
 def test_repository_handles_legacy_metadata_without_extraction_jobs(tmp_path) -> None:
