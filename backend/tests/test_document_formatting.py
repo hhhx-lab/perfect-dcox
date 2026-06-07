@@ -58,6 +58,19 @@ def test_formatter_applies_special_paragraphs_and_table_borders(tmp_path: Path) 
     assert borders[0].xpath("./*[local-name()='bottom']")
 
 
+def test_formatter_preserves_empty_and_unrecognized_paragraphs(tmp_path: Path) -> None:
+    source = tmp_path / "input.docx"
+    document = Document()
+    document.add_paragraph("")
+    document.add_paragraph("一个无法归类但必须保留的段落")
+    document.save(source)
+    output = tmp_path / "formatted.docx"
+
+    formatted = format_docx_with_profile(source, output, load_builtin_profiles()["ecnu_thesis"])
+
+    assert read_docx_text(formatted) == ["", "一个无法归类但必须保留的段落"]
+
+
 def qn(name: str) -> str:
     from docx.oxml.ns import qn as docx_qn
 
