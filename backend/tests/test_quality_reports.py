@@ -1,6 +1,9 @@
 import pytest
+from docx import Document
+from docx.shared import Cm
 from pydantic import ValidationError
 
+from app.documents.formatter import format_docx_with_profile
 from app.models import (
     FixAction,
     FixLoopRecord,
@@ -9,7 +12,10 @@ from app.models import (
     QualityReport,
     QualitySummary,
 )
+from app.profiles.seed import load_builtin_profiles
+from app.quality.inspection import inspect_docx_quality
 from app.storage.repository import JsonMetadataRepository
+from tests.document_fixtures import create_minimal_thesis_docx
 
 
 def test_quality_report_models_serialize_status_groups_and_issue_metadata() -> None:
@@ -211,3 +217,39 @@ def test_quality_report_serializes_issues_by_status_without_hiding_unsupported()
     assert payload["issues_by_status"]["unsupported"][0]["issue_id"] == "issue_unsupported"
     assert payload["summary"]["remaining_issue_count"] == 3
     assert payload["summary"]["all_compliant"] is False
+
+
+def test_docx_quality_inspection_passes_profiled_output_and_marks_page_numbers_unsupported(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+
+    issues = inspect_docx_quality(formatted, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["docx.page.margins"].status == "pass"
+    assert by_key["docx.body.style"].status == "pass"
+    assert by_key["docx.heading.style"].status == "pass"
+    assert by_key["docx.table.borders"].status == "pass"
+    assert by_key["docx.captions"].status == "pass"
+    assert by_key["docx.raw_latex"].status == "pass"
+    assert by_key["docx.page_number"].status == "unsupported"
+    assert by_key["docx.page_number"].recommendation
+
+
+def test_docx_quality_inspection_detects_margin_and_latex_failures(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    document = Document(source)
+    document.sections[0].top_margin = Cm(1.0)
+    document.add_paragraph(r"Inline residue: $E = mc^2$")
+    broken = tmp_path / "broken.docx"
+    document.save(broken)
+
+    issues = inspect_docx_quality(broken, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["docx.page.margins"].status == "fail"
+    assert by_key["docx.page.margins"].profile_rule_ref == "page.margins_cm"
+    assert by_key["docx.raw_latex"].status == "fail"
+    assert by_key["docx.raw_latex"].location == "paragraph[8]"

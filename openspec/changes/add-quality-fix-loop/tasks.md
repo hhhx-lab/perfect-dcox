@@ -6,7 +6,7 @@
 
 ## 2. DOCX and PDF Quality Checks
 
-- [ ] 2.1 Implement DOCX quality inspection for profile margins, body style, headings, table borders, captions, raw LaTeX residue, and page-number unsupported status.
+- [x] 2.1 Implement DOCX quality inspection for profile margins, body style, headings, table borders, captions, raw LaTeX residue, and page-number unsupported status.
 - [ ] 2.2 Implement PDF quality inspection for openability, page count, text extractability, and blank-page warnings.
 - [ ] 2.3 Add quality service tests for pass, warning, fail, and unsupported report generation.
 
