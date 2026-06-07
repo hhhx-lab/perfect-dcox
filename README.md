@@ -1,14 +1,14 @@
 # Word Format Agent
 
-Word Format Agent 是一个前后端分离的 Word 论文格式规范化工作台。当前仓库已实现基础平台和 MyPipeline `add-profile-management`：文件上传、文件元数据、占位排版任务、版本化格式 Profile、内置 ECNU 示例 profile、Profile API、结构化编辑器和 YAML 导入/导出。
+Word Format Agent 是一个前后端分离的 Word 论文格式规范化工作台。当前仓库已实现基础平台、版本化格式 Profile 和首版 DOCX 格式化引擎：文件上传、文件元数据、带 profile 的排版任务、内置 ECNU 示例 profile、Profile API、结构化编辑器、YAML 导入/导出、DOC/DOCX 输入处理、DOCX 输出登记和前端输出可视化。
 
-当前阶段不包含真实 DOCX 重排、PDF 转换、Agent 规则抽取或质检引擎。占位排版任务可以引用 `profile_id + profile_version`，但 worker 暂不解释格式规则；真实重排由后续 OpenSpec change 接入。
+当前阶段不包含 Agent 规则抽取、自动质检修正循环或文件下载接口。带 `profile_id + profile_version` 的任务会由 worker 调用文档引擎生成规范化 DOCX；未带 profile 的任务仍走兼容的 placeholder 完成路径。PDF 导出已经在 service 层实现，当前任务 API 默认只登记 DOCX 输出，PDF 可通过 service/测试路径验证。
 
 ## 目录
 
 ```text
-backend/     FastAPI 后端、文件存储、Profile API、任务 API、placeholder worker
-frontend/    React + TypeScript + Vite 工作台和 Profile 编辑器
+backend/     FastAPI 后端、文件存储、Profile API、任务 API、DOCX 格式化 worker
+frontend/    React + TypeScript + Vite 工作台、Profile 编辑器和任务输出面板
 docs/        产品方案
 openspec/    OpenSpec change artifacts
 plan/        MyPlan 需求质量门产物
@@ -27,7 +27,7 @@ storage/     本地上传文件和 metadata.json，运行产物默认不入库
 cp .env.example .env
 ```
 
-当前阶段只需要保留 `FILE_STORAGE_ROOT=./storage` 即可启动上传、Profile 和任务 API。`LLM_API_KEY`、`LLM_MODEL`、`SOFFICE_BIN` 在后续 Agent 和文档转换阶段启用。
+本地上传、Profile 和 `.docx` 格式化至少需要保留 `FILE_STORAGE_ROOT=./storage`。处理 legacy `.doc` 输入或导出 PDF 时必须配置 `SOFFICE_BIN`，本机常见路径是 `/opt/homebrew/bin/soffice`。`LLM_API_KEY`、`LLM_MODEL` 仍留给后续 Agent 规则抽取/修正解释阶段使用。
 
 ## 本地启动
 
@@ -46,12 +46,14 @@ npm install
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-placeholder worker 手工执行示例：
+worker 手工执行示例：
 
 ```bash
 cd backend
-uv run python -c "from pathlib import Path; from app.storage.repository import JsonMetadataRepository; from app.jobs.worker import process_next_queued_job; print(process_next_queued_job(JsonMetadataRepository(Path('../storage/metadata.json'))))"
+uv run python -c "from pathlib import Path; from app.core.config import get_settings; from app.jobs.worker import process_next_queued_job; from app.storage.local import LocalFileStorage; from app.storage.repository import JsonMetadataRepository; settings=get_settings(); storage=LocalFileStorage(settings.file_storage_root); print(process_next_queued_job(JsonMetadataRepository(settings.file_storage_root / 'metadata.json'), storage=storage, soffice_bin=settings.soffice_bin))"
 ```
+
+带 profile 的 queued job 会读取上传文件和 profile 版本，必要时把 `.doc` 转成 `.docx`，再生成 `storage/outputs/<file_id>.docx` 并把输出 file_id 写回任务。未带 profile 的 queued job 只校验输入文件存在并完成 placeholder 状态更新。
 
 ## 验证
 
@@ -72,7 +74,15 @@ npm run build
 OpenSpec 验证：
 
 ```bash
-openspec validate add-profile-management --strict --no-interactive
+openspec validate add-docx-formatting-engine --strict --no-interactive
+```
+
+文档工具链 smoke check：
+
+```bash
+codex-docx-inspect storage/outputs/<generated-file-id>.docx
+codex-docx-to-pdf storage/outputs/<generated-file-id>.docx storage/outputs
+codex-pdf-inspect storage/outputs/<generated-file-id>.pdf
 ```
 
 ## API
@@ -87,7 +97,7 @@ openspec validate add-profile-management --strict --no-interactive
 - `POST /api/profiles/{profile_id}/archive`：归档 Profile，保留历史版本。
 - `POST /api/profiles/import`：从 YAML 导入 Profile。
 - `GET /api/profiles/{profile_id}/versions/{version}/export`：导出指定 Profile 版本 YAML。
-- `POST /api/jobs`：基于已上传文件创建 placeholder format job，可选传入 `profile_id` 和 `profile_version`。
+- `POST /api/jobs`：基于已上传文件创建 format job，可选传入 `profile_id` 和 `profile_version`；带 profile 的任务由 worker 生成 DOCX 输出。
 - `GET /api/jobs/{job_id}`：读取任务状态。
 
 ## Profile 工作流
@@ -95,7 +105,15 @@ openspec validate add-profile-management --strict --no-interactive
 - 内置 `profiles/ecnu_thesis.yaml` 会在后端启动时写入本地 `metadata.json`，作为 `active` / `system` / `1.0.0` 示例。
 - Profile 使用确定性结构化字段，而不是提示词；字段覆盖页面、字体、正文、标题、摘要、图表题注、公式、参考文献和 quality 配置。
 - Web 端 Profile 面板支持列表、详情、常用字段结构化编辑、保存新版本、YAML 导入和 YAML 导出。
-- 历史版本不会被覆盖，排版任务记录中保存具体 `profile_id + profile_version`，方便后续格式引擎追溯。
+- 历史版本不会被覆盖，排版任务记录中保存具体 `profile_id + profile_version`，格式化 worker 按该版本应用页面、正文、标题、题注、公式、参考文献和基础表格边框规则。
+
+## 文档引擎能力与限制
+
+- `.docx` 输入会直接进入解析和格式化流程；`.doc` 输入需要 `SOFFICE_BIN` 指向可用的 LibreOffice/soffice。
+- 格式化引擎保留原文段落文本，并应用 profile 中的 A4 页面边距、正文中英文字体、字号、行距、首行缩进、标题样式、题注/公式/参考文献段落和基础三线表边框。
+- 输出 DOCX 会登记为普通 `FileRecord`，存放在 `storage/outputs/`，前端任务面板会按 `output_file_ids` 拉取文件名、大小、MIME type 和 file_id。
+- 当前不做语义级章节重排、复杂域代码/目录更新、图片位置优化、参考文献自动排序或 Word 下载接口；这些属于后续 Agent/质检闭环 change。
+- PDF 导出函数已经存在，依赖 `SOFFICE_BIN`；当前默认 worker 只请求 DOCX 输出，PDF smoke 可通过 service 测试或文档工具链单独执行。
 
 ## 安全与提交约定
 
