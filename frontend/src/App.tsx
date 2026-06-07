@@ -267,7 +267,14 @@ function App() {
     setIsCreatingJob(true);
     setJobError(null);
     try {
-      const created = await apiClient.createJob(uploadedFile.file_id);
+      const profileRef =
+        selectedProfile && selectedProfileKey
+          ? {
+              profile_id: selectedProfile.id,
+              profile_version: selectedProfile.version,
+            }
+          : undefined;
+      const created = await apiClient.createJob(uploadedFile.file_id, profileRef);
       setJob(created);
     } catch (error) {
       setJobError(error instanceof Error ? error.message : "创建任务失败。");
@@ -733,6 +740,10 @@ function App() {
             <h2 id="job-title">占位排版任务</h2>
             <p>创建任务后会进入 queued 状态，等待后端 placeholder worker 处理。</p>
           </div>
+          <div className="profile-reference">
+            <span>Profile Reference</span>
+            <strong>{selectedProfile ? `${selectedProfile.id} v${selectedProfile.version}` : "Unprofiled"}</strong>
+          </div>
           <div className="job-actions">
             <button type="button" onClick={createJob} disabled={!uploadedFile || isCreatingJob}>
               <ListChecks size={18} aria-hidden="true" />
@@ -760,6 +771,14 @@ function App() {
                     <div>
                       <dt>current_step</dt>
                       <dd>{job.current_step || "N/A"}</dd>
+                    </div>
+                    <div>
+                      <dt>profile</dt>
+                      <dd>
+                        {job.profile_id && job.profile_version
+                          ? `${job.profile_id} v${job.profile_version}`
+                          : "Unprofiled"}
+                      </dd>
                     </div>
                     {job.error_message && (
                       <div>
