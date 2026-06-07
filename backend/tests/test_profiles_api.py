@@ -48,6 +48,9 @@ def test_save_new_profile_version_and_reject_duplicate(tmp_path: Path) -> None:
     saved = client.post("/api/profiles/sample_thesis/versions", json=payload)
     assert saved.status_code == 201
 
+    mismatched = client.post("/api/profiles/other_profile/versions", json=payload)
+    assert mismatched.status_code == 400
+
     listed = client.get("/api/profiles").json()
     sample = next(item for item in listed if item["profile_id"] == "sample_thesis")
     assert sample["current_version"] == "1.0.1"
@@ -117,3 +120,6 @@ def test_create_job_with_profile_reference_and_reject_missing_reference(tmp_path
         },
     )
     assert missing.status_code == 404
+
+    partial = client.post("/api/jobs", json={"input_file_id": file_id, "profile_id": "ecnu_thesis"})
+    assert partial.status_code == 400
