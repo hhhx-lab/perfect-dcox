@@ -32,4 +32,11 @@ def build_profile_extractions_router(
         except ExtractionSourceError as error:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
+    @router.get("/{extraction_id}", response_model=ProfileExtractionRecord)
+    def get_profile_extraction(extraction_id: str) -> ProfileExtractionRecord:
+        record = service.repository.get_profile_extraction(extraction_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile extraction job not found.")
+        return record
+
     return router
