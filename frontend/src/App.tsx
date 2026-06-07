@@ -247,6 +247,21 @@ function App() {
     setProfileSaveMessage("已创建本地 draft，保存后会写入后端。");
   };
 
+  const loadExtractionDraft = () => {
+    if (!extraction?.profile_draft) {
+      setExtractionError("没有可载入的 profile draft。");
+      return;
+    }
+    const next = cloneProfile(extraction.profile_draft);
+    next.status = "draft";
+    next.source = "imported";
+    setSelectedProfileKey(null);
+    setSelectedProfile(null);
+    setProfileDraft(next);
+    setProfileSaveError(null);
+    setProfileSaveMessage("已载入 Agent profile draft，确认后可保存为 draft 或 active。");
+  };
+
   const saveProfileDraft = async () => {
     if (!profileDraft) {
       setProfileSaveError("没有可保存的 profile draft。");
@@ -944,6 +959,14 @@ function App() {
                       </div>
                     )}
                   </dl>
+                  {extraction.profile_draft && (
+                    <div className="editor-actions">
+                      <button type="button" onClick={loadExtractionDraft}>
+                        <Save size={16} aria-hidden="true" />
+                        载入草案
+                      </button>
+                    </div>
+                  )}
                   {extraction.error_message && (
                     <section className="formatting-error" aria-label="规则抽取失败">
                       <strong>规则抽取失败</strong>
