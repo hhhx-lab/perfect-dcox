@@ -4,7 +4,9 @@ from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.documents.service import DocumentFormattingError, DocumentFormattingService
+from app.jobs.worker import process_placeholder_job
 from app.main import create_app
+from app.models import JobRecord
 from app.profiles.seed import load_builtin_profiles
 from app.storage.local import LocalFileStorage
 from app.storage.repository import JsonMetadataRepository
@@ -79,3 +81,53 @@ def test_formatting_service_pdf_export_failure_is_diagnostic(tmp_path: Path) -> 
         assert "SOFFICE_BIN" in str(error)
     else:
         raise AssertionError("Expected PDF export failure when SOFFICE_BIN is missing.")
+
+
+def test_worker_runs_document_engine_for_profile_referenced_job(tmp_path: Path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    storage = LocalFileStorage(tmp_path)
+    source = create_minimal_thesis_docx(tmp_path / "input.docx")
+    input_record = storage.store_generated_file(
+        source,
+        filename="input.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    repository.add_file(input_record)
+    repository.save_profile_version(load_builtin_profiles()["ecnu_thesis"])
+    job = repository.add_job(
+        JobRecord(
+            job_id="job_profiled",
+            job_type="placeholder_format",
+            input_file_id=input_record.file_id,
+            profile_id="ecnu_thesis",
+            profile_version="1.0.0",
+        )
+    )
+
+    completed = process_placeholder_job(repository, job.job_id, storage=storage, soffice_bin=None)
+
+    assert completed.status == "completed"
+    assert completed.progress == 100
+    assert completed.output_file_ids
+    assert repository.get_file(completed.output_file_ids[0]) is not None
+
+
+def test_worker_reports_formatting_failure(tmp_path: Path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    storage = LocalFileStorage(tmp_path)
+    repository.save_profile_version(load_builtin_profiles()["ecnu_thesis"])
+    job = repository.add_job(
+        JobRecord(
+            job_id="job_missing_input",
+            job_type="placeholder_format",
+            input_file_id="file_missing",
+            profile_id="ecnu_thesis",
+            profile_version="1.0.0",
+        )
+    )
+
+    failed = process_placeholder_job(repository, job.job_id, storage=storage, soffice_bin=None)
+
+    assert failed.status == "failed"
+    assert failed.progress == 100
+    assert "Input file" in (failed.error_message or "")
