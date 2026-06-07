@@ -83,3 +83,37 @@ def test_archive_profile_keeps_versions_available(tmp_path: Path) -> None:
     detail = client.get("/api/profiles/ecnu_thesis/versions/1.0.0")
     assert detail.status_code == 200
     assert detail.json()["id"] == "ecnu_thesis"
+
+
+def test_create_job_with_profile_reference_and_reject_missing_reference(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    uploaded = client.post("/api/files", files={"file": ("sample.docx", b"doc", "application/docx")})
+    file_id = uploaded.json()["file_id"]
+
+    created = client.post(
+        "/api/jobs",
+        json={
+            "input_file_id": file_id,
+            "profile_id": "ecnu_thesis",
+            "profile_version": "1.0.0",
+        },
+    )
+    assert created.status_code == 201
+    payload = created.json()
+    assert payload["profile_id"] == "ecnu_thesis"
+    assert payload["profile_version"] == "1.0.0"
+
+    unprofiled = client.post("/api/jobs", json={"input_file_id": file_id})
+    assert unprofiled.status_code == 201
+    assert unprofiled.json()["profile_id"] is None
+    assert unprofiled.json()["profile_version"] is None
+
+    missing = client.post(
+        "/api/jobs",
+        json={
+            "input_file_id": file_id,
+            "profile_id": "missing",
+            "profile_version": "1.0.0",
+        },
+    )
+    assert missing.status_code == 404

@@ -25,6 +25,8 @@ class JobRecord(BaseModel):
     job_id: str
     job_type: str
     input_file_id: str
+    profile_id: str | None = None
+    profile_version: str | None = None
     status: JobStatus = "queued"
     progress: int = 0
     current_step: str | None = None
