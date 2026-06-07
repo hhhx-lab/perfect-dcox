@@ -8,7 +8,7 @@ import {
   Upload,
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import { apiClient, FileRecord, JobRecord, ServiceHealth } from "./api/client";
+import { apiClient, FileRecord, FormatProfile, JobRecord, ProfileSummary, ServiceHealth } from "./api/client";
 
 const workbenchAreas = [
   {
@@ -41,6 +41,11 @@ const workbenchAreas = [
 function App() {
   const [health, setHealth] = useState<ServiceHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
+  const [selectedProfileKey, setSelectedProfileKey] = useState<string | null>(null);
+  const [selectedProfile, setSelectedProfile] = useState<FormatProfile | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadedFile, setUploadedFile] = useState<FileRecord | null>(null);
   const [job, setJob] = useState<JobRecord | null>(null);
@@ -62,6 +67,46 @@ function App() {
         setHealthError(error.message);
       });
   }, []);
+
+  const loadProfiles = async () => {
+    setIsLoadingProfiles(true);
+    try {
+      const summaries = await apiClient.listProfiles();
+      setProfiles(summaries);
+      setProfileError(null);
+      if (!selectedProfileKey && summaries.length > 0) {
+        setSelectedProfileKey(`${summaries[0].profile_id}@${summaries[0].current_version}`);
+      }
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "Profile 加载失败。");
+    } finally {
+      setIsLoadingProfiles(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadProfiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!selectedProfileKey) {
+      setSelectedProfile(null);
+      return;
+    }
+
+    const [profileId, version] = selectedProfileKey.split("@");
+    apiClient
+      .getProfile(profileId, version)
+      .then((profile) => {
+        setSelectedProfile(profile);
+        setProfileError(null);
+      })
+      .catch((error: Error) => {
+        setSelectedProfile(null);
+        setProfileError(error.message);
+      });
+  }, [selectedProfileKey]);
 
   const onUpload = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -213,6 +258,96 @@ function App() {
             )}
           </section>
         )}
+
+        <section className="profile-panel" id="Profile" aria-labelledby="profile-title">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Profile</p>
+              <h2 id="profile-title">格式 Profile 管理</h2>
+            </div>
+            <button type="button" className="ghost-button" onClick={loadProfiles} disabled={isLoadingProfiles}>
+              <RefreshCcw size={16} aria-hidden="true" />
+              {isLoadingProfiles ? "加载中" : "刷新"}
+            </button>
+          </div>
+          {profileError && <p className="error-text profile-error">{profileError}</p>}
+          <div className="profile-layout">
+            <div className="profile-list" aria-label="Profile 列表">
+              {profiles.length === 0 && !profileError ? (
+                <p className="muted">暂无可用 profile。</p>
+              ) : (
+                profiles.map((profile) => {
+                  const key = `${profile.profile_id}@${profile.current_version}`;
+                  return (
+                    <button
+                      type="button"
+                      className={`profile-row ${selectedProfileKey === key ? "selected" : ""}`}
+                      key={key}
+                      onClick={() => setSelectedProfileKey(key)}
+                    >
+                      <span>{profile.name}</span>
+                      <small>
+                        {profile.status} · v{profile.current_version} · {profile.source}
+                      </small>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+            <div className="profile-detail" aria-live="polite">
+              {selectedProfile ? (
+                <>
+                  <div className="detail-title">
+                    <div>
+                      <p className="eyebrow">{selectedProfile.id}</p>
+                      <h3>{selectedProfile.name}</h3>
+                    </div>
+                    <span className={`status-badge ${selectedProfile.status}`}>{selectedProfile.status}</span>
+                  </div>
+                  <dl className="profile-meta">
+                    <div>
+                      <dt>当前版本</dt>
+                      <dd>{selectedProfile.version}</dd>
+                    </div>
+                    <div>
+                      <dt>来源</dt>
+                      <dd>{selectedProfile.source}</dd>
+                    </div>
+                    <div>
+                      <dt>页面</dt>
+                      <dd>
+                        {selectedProfile.page.size} · {selectedProfile.page.orientation}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>正文</dt>
+                      <dd>
+                        {selectedProfile.body.font.chinese} / {selectedProfile.body.font.latin} ·{" "}
+                        {selectedProfile.body.font.size_pt}pt · {selectedProfile.body.line_spacing}x
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>页边距</dt>
+                      <dd>
+                        上 {selectedProfile.page.margins_cm.top} / 下 {selectedProfile.page.margins_cm.bottom} / 左{" "}
+                        {selectedProfile.page.margins_cm.left} / 右 {selectedProfile.page.margins_cm.right} cm
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>更新时间</dt>
+                      <dd>
+                        {profiles.find((item) => `${item.profile_id}@${item.current_version}` === selectedProfileKey)
+                          ?.updated_at || "N/A"}
+                      </dd>
+                    </div>
+                  </dl>
+                </>
+              ) : (
+                <p className="muted">选择一个 profile 查看详情。</p>
+              )}
+            </div>
+          </div>
+        </section>
 
         <section className="job-panel" id="任务" aria-labelledby="job-title">
           <div>
