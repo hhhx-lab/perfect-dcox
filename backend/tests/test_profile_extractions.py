@@ -427,3 +427,121 @@ def test_profile_extraction_service_records_provider_failure(tmp_path) -> None:
 
     assert failed.status == "failed"
     assert "LLM_API_KEY" in (failed.error_message or "")
+
+
+def test_ecnu_sample_extraction_coverage_with_deterministic_provider(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_copy(update={"id": "ecnu_extracted_rules", "status": "draft"})
+    ecnu_text = (
+        "论文采用A4纸。页边距上2.5厘米、下2.0厘米、左3.0厘米、右2.5厘米。"
+        "正文宋体小四，英文Times New Roman，首行缩进2字符，1.5倍行距。"
+        "摘要300-500字，标题黑体小四，页码居中，表格采用三线表，图题在图下方，表题在表上方，公式居中编号右侧。"
+    )
+
+    class EcnuProvider:
+        def extract(self, source_text: str, source_meta: dict[str, str]) -> str:
+            assert "A4" in source_text
+            return __import__("json").dumps(
+                {
+                    "profile_draft": profile.model_dump(mode="json"),
+                    "uncertain_items": [
+                        {
+                            "field_path": "page_number.position",
+                            "message": "当前 profile schema 暂无页码位置字段。",
+                            "suggestion": "记录为证据，后续 schema 扩展时确认。",
+                        }
+                    ],
+                    "evidence": [
+                        {"field_path": "page.size", "source": "natural_language", "quote": "A4纸", "confidence": 0.98},
+                        {
+                            "field_path": "page.margins_cm",
+                            "source": "natural_language",
+                            "quote": "上2.5厘米、下2.0厘米、左3.0厘米、右2.5厘米",
+                            "confidence": 0.96,
+                        },
+                        {
+                            "field_path": "body.first_line_indent_chars",
+                            "source": "natural_language",
+                            "quote": "首行缩进2字符",
+                            "confidence": 0.95,
+                        },
+                        {
+                            "field_path": "body.line_spacing",
+                            "source": "natural_language",
+                            "quote": "1.5倍行距",
+                            "confidence": 0.95,
+                        },
+                        {
+                            "field_path": "body.font.latin",
+                            "source": "natural_language",
+                            "quote": "Times New Roman",
+                            "confidence": 0.95,
+                        },
+                        {
+                            "field_path": "abstract.length_range_chars",
+                            "source": "natural_language",
+                            "quote": "摘要300-500字",
+                            "confidence": 0.92,
+                        },
+                        {
+                            "field_path": "body.font.chinese",
+                            "source": "natural_language",
+                            "quote": "正文宋体小四",
+                            "confidence": 0.95,
+                        },
+                        {
+                            "field_path": "headings.1.font.chinese",
+                            "source": "natural_language",
+                            "quote": "标题黑体小四",
+                            "confidence": 0.86,
+                        },
+                        {
+                            "field_path": "table.caption.position",
+                            "source": "natural_language",
+                            "quote": "表题在表上方",
+                            "confidence": 0.9,
+                        },
+                        {
+                            "field_path": "figure.caption.position",
+                            "source": "natural_language",
+                            "quote": "图题在图下方",
+                            "confidence": 0.9,
+                        },
+                        {
+                            "field_path": "equations",
+                            "source": "natural_language",
+                            "quote": "公式居中编号右侧",
+                            "confidence": 0.87,
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    service = ProfileExtractionService(repository, tmp_path, soffice_bin=None, provider=EcnuProvider())
+    record = service.create_extraction(file_id=None, natural_language=ecnu_text)
+
+    completed = service.process_extraction(record.extraction_id)
+
+    assert completed.status == "completed"
+    assert completed.profile_draft is not None
+    draft = completed.profile_draft
+    assert draft.page.size == "A4"
+    assert draft.page.margins_cm.top == 2.5
+    assert draft.page.margins_cm.bottom == 2.0
+    assert draft.page.margins_cm.left == 3.0
+    assert draft.page.margins_cm.right == 2.5
+    assert draft.body.first_line_indent_chars == 2
+    assert draft.body.line_spacing == 1.5
+    assert draft.body.font.latin == "Times New Roman"
+    assert draft.abstract.length_range_chars.min == 300
+    assert draft.abstract.length_range_chars.max == 500
+    assert draft.body.font.chinese == "SimSun"
+    assert draft.headings[0].font.chinese == "SimHei"
+    assert draft.table.caption.position == "above"
+    assert draft.figure.caption.position == "below"
+    assert draft.equations.alignment == "center"
+    assert draft.equations.numbering == "right"
+    assert any(item.field_path == "page_number.position" for item in completed.uncertain_items)
+    evidence_paths = {item.field_path for item in completed.evidence}
+    assert {"page.size", "page.margins_cm", "body.line_spacing", "equations"}.issubset(evidence_paths)
