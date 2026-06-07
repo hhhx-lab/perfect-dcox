@@ -17,7 +17,9 @@ body {
 }
 
 button,
-input {
+input,
+select,
+textarea {
   font: inherit;
 }
 
@@ -370,6 +372,110 @@ p {
   color: #303638;
 }
 
+.profile-editor {
+  display: grid;
+  gap: 14px;
+  border-top: 1px solid #d2ddd7;
+  padding-top: 16px;
+}
+
+.editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.editor-header h3 {
+  margin: 0;
+  font-size: 1.08rem;
+}
+
+.editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.editor-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 12px;
+  background: #2f6564;
+  color: #fffdf7;
+}
+
+.editor-actions .ghost-button {
+  border: 1px solid #aeb8b2;
+  background: #ffffff;
+  color: #263536;
+}
+
+.editor-actions button:disabled {
+  opacity: 0.58;
+}
+
+.success-text {
+  margin-bottom: 0;
+  border-left: 3px solid #2f6564;
+  padding-left: 10px;
+  color: #2f6564;
+  font-weight: 700;
+}
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.editor-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.editor-grid span,
+.quality-toggles span {
+  color: #485458;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.editor-grid input,
+.editor-grid select {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #cbd6d2;
+  border-radius: 6px;
+  padding: 7px 9px;
+  background: #ffffff;
+  color: #263536;
+}
+
+.quality-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.quality-toggles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 1px solid #cbd6d2;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #ffffff;
+}
+
 .job-panel {
   display: grid;
   gap: 16px;
@@ -512,6 +618,19 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .editor-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .editor-actions {
+    justify-content: flex-start;
+  }
+
+  .editor-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .area-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -527,6 +646,10 @@ p {
   }
 
   .profile-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .editor-grid {
     grid-template-columns: 1fr;
   }
 }

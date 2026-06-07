@@ -4,7 +4,9 @@ import {
   FolderOpen,
   LayoutDashboard,
   ListChecks,
+  Plus,
   RefreshCcw,
+  Save,
   Upload,
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
@@ -38,14 +40,26 @@ const workbenchAreas = [
   },
 ];
 
+function profileKey(profileId: string, version: string) {
+  return `${profileId}@${version}`;
+}
+
+function cloneProfile(profile: FormatProfile): FormatProfile {
+  return JSON.parse(JSON.stringify(profile)) as FormatProfile;
+}
+
 function App() {
   const [health, setHealth] = useState<ServiceHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [selectedProfileKey, setSelectedProfileKey] = useState<string | null>(null);
   const [selectedProfile, setSelectedProfile] = useState<FormatProfile | null>(null);
+  const [profileDraft, setProfileDraft] = useState<FormatProfile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
+  const [profileSaveMessage, setProfileSaveMessage] = useState<string | null>(null);
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadedFile, setUploadedFile] = useState<FileRecord | null>(null);
   const [job, setJob] = useState<JobRecord | null>(null);
@@ -68,14 +82,16 @@ function App() {
       });
   }, []);
 
-  const loadProfiles = async () => {
+  const loadProfiles = async (nextSelectedKey?: string) => {
     setIsLoadingProfiles(true);
     try {
       const summaries = await apiClient.listProfiles();
       setProfiles(summaries);
       setProfileError(null);
-      if (!selectedProfileKey && summaries.length > 0) {
-        setSelectedProfileKey(`${summaries[0].profile_id}@${summaries[0].current_version}`);
+      if (nextSelectedKey) {
+        setSelectedProfileKey(nextSelectedKey);
+      } else if (!selectedProfileKey && summaries.length > 0) {
+        setSelectedProfileKey(profileKey(summaries[0].profile_id, summaries[0].current_version));
       }
     } catch (error) {
       setProfileError(error instanceof Error ? error.message : "Profile 加载失败。");
@@ -100,13 +116,72 @@ function App() {
       .getProfile(profileId, version)
       .then((profile) => {
         setSelectedProfile(profile);
+        setProfileDraft(cloneProfile(profile));
         setProfileError(null);
+        setProfileSaveError(null);
+        setProfileSaveMessage(null);
       })
       .catch((error: Error) => {
         setSelectedProfile(null);
+        setProfileDraft(null);
         setProfileError(error.message);
       });
   }, [selectedProfileKey]);
+
+  const updateProfileDraft = (mutator: (draft: FormatProfile) => void) => {
+    setProfileDraft((current) => {
+      if (!current) {
+        return current;
+      }
+      const next = cloneProfile(current);
+      mutator(next);
+      return next;
+    });
+    setProfileSaveError(null);
+    setProfileSaveMessage(null);
+  };
+
+  const createDraftFromSelected = () => {
+    const source = selectedProfile ?? profileDraft;
+    if (!source) {
+      setProfileSaveError("请先选择一个 profile。");
+      return;
+    }
+    const next = cloneProfile(source);
+    next.id = `draft_${Date.now()}`;
+    next.name = `${source.name} Draft`;
+    next.version = "0.1.0";
+    next.status = "draft";
+    next.source = "user";
+    setSelectedProfileKey(null);
+    setSelectedProfile(null);
+    setProfileDraft(next);
+    setProfileSaveError(null);
+    setProfileSaveMessage("已创建本地 draft，保存后会写入后端。");
+  };
+
+  const saveProfileDraft = async () => {
+    if (!profileDraft) {
+      setProfileSaveError("没有可保存的 profile draft。");
+      return;
+    }
+    setIsSavingProfile(true);
+    setProfileSaveError(null);
+    setProfileSaveMessage(null);
+    try {
+      const exists = profiles.some((profile) => profile.profile_id === profileDraft.id);
+      const saved = exists ? await apiClient.saveProfileVersion(profileDraft) : await apiClient.saveProfile(profileDraft);
+      const key = profileKey(saved.id, saved.version);
+      setSelectedProfile(saved);
+      setProfileDraft(cloneProfile(saved));
+      setProfileSaveMessage(`已保存 ${saved.name} v${saved.version}`);
+      await loadProfiles(key);
+    } catch (error) {
+      setProfileSaveError(error instanceof Error ? error.message : "保存 profile 失败。");
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
 
   const onUpload = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -265,7 +340,7 @@ function App() {
               <p className="eyebrow">Profile</p>
               <h2 id="profile-title">格式 Profile 管理</h2>
             </div>
-            <button type="button" className="ghost-button" onClick={loadProfiles} disabled={isLoadingProfiles}>
+            <button type="button" className="ghost-button" onClick={() => void loadProfiles()} disabled={isLoadingProfiles}>
               <RefreshCcw size={16} aria-hidden="true" />
               {isLoadingProfiles ? "加载中" : "刷新"}
             </button>
@@ -277,7 +352,7 @@ function App() {
                 <p className="muted">暂无可用 profile。</p>
               ) : (
                 profiles.map((profile) => {
-                  const key = `${profile.profile_id}@${profile.current_version}`;
+                  const key = profileKey(profile.profile_id, profile.current_version);
                   return (
                     <button
                       type="button"
@@ -336,7 +411,7 @@ function App() {
                     <div>
                       <dt>更新时间</dt>
                       <dd>
-                        {profiles.find((item) => `${item.profile_id}@${item.current_version}` === selectedProfileKey)
+                        {profiles.find((item) => profileKey(item.profile_id, item.current_version) === selectedProfileKey)
                           ?.updated_at || "N/A"}
                       </dd>
                     </div>
@@ -347,6 +422,231 @@ function App() {
               )}
             </div>
           </div>
+          {profileDraft && (
+            <form className="profile-editor" onSubmit={(event) => event.preventDefault()}>
+              <div className="editor-header">
+                <div>
+                  <p className="eyebrow">Structured Editor</p>
+                  <h3>常用字段编辑</h3>
+                </div>
+                <div className="editor-actions">
+                  <button type="button" className="ghost-button" onClick={createDraftFromSelected}>
+                    <Plus size={16} aria-hidden="true" />
+                    新建 Draft
+                  </button>
+                  <button type="button" onClick={saveProfileDraft} disabled={isSavingProfile}>
+                    <Save size={16} aria-hidden="true" />
+                    {isSavingProfile ? "保存中" : "保存版本"}
+                  </button>
+                </div>
+              </div>
+              {(profileSaveError || profileSaveMessage) && (
+                <p className={profileSaveError ? "error-text profile-error" : "success-text"} aria-live="polite">
+                  {profileSaveError || profileSaveMessage}
+                </p>
+              )}
+              <div className="editor-grid">
+                <label>
+                  <span>Profile ID</span>
+                  <input
+                    value={profileDraft.id}
+                    onChange={(event) => updateProfileDraft((draft) => void (draft.id = event.target.value))}
+                  />
+                </label>
+                <label>
+                  <span>名称</span>
+                  <input
+                    value={profileDraft.name}
+                    onChange={(event) => updateProfileDraft((draft) => void (draft.name = event.target.value))}
+                  />
+                </label>
+                <label>
+                  <span>版本</span>
+                  <input
+                    value={profileDraft.version}
+                    onChange={(event) => updateProfileDraft((draft) => void (draft.version = event.target.value))}
+                  />
+                </label>
+                <label>
+                  <span>状态</span>
+                  <select
+                    value={profileDraft.status}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.status = event.target.value as FormatProfile["status"]))
+                    }
+                  >
+                    <option value="draft">draft</option>
+                    <option value="active">active</option>
+                    <option value="archived">archived</option>
+                  </select>
+                </label>
+                <label>
+                  <span>上边距 cm</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={profileDraft.page.margins_cm.top}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.page.margins_cm.top = Number(event.target.value)))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>下边距 cm</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={profileDraft.page.margins_cm.bottom}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.page.margins_cm.bottom = Number(event.target.value)))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>左边距 cm</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={profileDraft.page.margins_cm.left}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.page.margins_cm.left = Number(event.target.value)))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>右边距 cm</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={profileDraft.page.margins_cm.right}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.page.margins_cm.right = Number(event.target.value)))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>中文正文字体</span>
+                  <input
+                    value={profileDraft.body.font.chinese}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.body.font.chinese = event.target.value))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>英文字体</span>
+                  <input
+                    value={profileDraft.body.font.latin}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.body.font.latin = event.target.value))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>正文字号 pt</span>
+                  <input
+                    type="number"
+                    step="0.5"
+                    value={profileDraft.body.font.size_pt}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.body.font.size_pt = Number(event.target.value)))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>行距</span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={profileDraft.body.line_spacing}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => void (draft.body.line_spacing = Number(event.target.value)))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>一级标题字体</span>
+                  <input
+                    value={profileDraft.headings[0]?.font.chinese ?? ""}
+                    onChange={(event) =>
+                      updateProfileDraft((draft) => {
+                        if (draft.headings[0]) draft.headings[0].font.chinese = event.target.value;
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  <span>表题位置</span>
+                  <select
+                    value={profileDraft.table.caption.position}
+                    onChange={(event) =>
+                      updateProfileDraft(
+                        (draft) =>
+                          void (draft.table.caption.position = event.target.value as FormatProfile["table"]["caption"]["position"]),
+                      )
+                    }
+                  >
+                    <option value="above">above</option>
+                    <option value="below">below</option>
+                  </select>
+                </label>
+                <label>
+                  <span>图题位置</span>
+                  <select
+                    value={profileDraft.figure.caption.position}
+                    onChange={(event) =>
+                      updateProfileDraft(
+                        (draft) =>
+                          void (draft.figure.caption.position = event.target.value as FormatProfile["figure"]["caption"]["position"]),
+                      )
+                    }
+                  >
+                    <option value="below">below</option>
+                    <option value="above">above</option>
+                  </select>
+                </label>
+                <label>
+                  <span>检查强度</span>
+                  <select
+                    value={profileDraft.quality.strictness}
+                    onChange={(event) =>
+                      updateProfileDraft(
+                        (draft) =>
+                          void (draft.quality.strictness = event.target.value as FormatProfile["quality"]["strictness"]),
+                      )
+                    }
+                  >
+                    <option value="lenient">lenient</option>
+                    <option value="standard">standard</option>
+                    <option value="strict">strict</option>
+                  </select>
+                </label>
+              </div>
+              <div className="quality-toggles">
+                {[
+                  ["check_margins", "页边距"],
+                  ["check_fonts", "字体"],
+                  ["check_line_spacing", "行距"],
+                  ["check_headings", "标题"],
+                  ["check_references", "参考文献"],
+                ].map(([key, label]) => (
+                  <label key={key}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(profileDraft.quality[key as keyof FormatProfile["quality"]])}
+                      onChange={(event) =>
+                        updateProfileDraft(
+                          (draft) =>
+                            void ((draft.quality[key as keyof FormatProfile["quality"]] as boolean) = event.target.checked),
+                        )
+                      }
+                    />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
+            </form>
+          )}
         </section>
 
         <section className="job-panel" id="任务" aria-labelledby="job-title">
