@@ -19,7 +19,7 @@
 
 - [x] 4.1 Add quality report creation and retrieval APIs for formatted output files.
 - [x] 4.2 Add fix-plan creation and user-confirmed fix-loop APIs.
-- [ ] 4.3 Add API tests for report retrieval, grouped status counts, fix-plan validation, and confirmation gating.
+- [x] 4.3 Add API tests for report retrieval, grouped status counts, fix-plan validation, and confirmation gating.
 
 ## 5. Frontend Quality Review
 

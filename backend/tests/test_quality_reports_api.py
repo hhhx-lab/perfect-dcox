@@ -122,6 +122,11 @@ def test_create_fix_plan_and_confirm_fix_loop_requires_user_confirmation(tmp_pat
     assert loop["new_output_file_ids"] == []
     assert loop["updated_report_id"] is None
 
+    persisted = JsonMetadataRepository(tmp_path / "metadata.json").get_quality_fix_loop(loop["fix_loop_id"])
+    assert persisted is not None
+    assert persisted.original_report_id == report["report_id"]
+    assert persisted.selected_issue_ids == plan["manual_review_issue_ids"][:1]
+
 
 def test_confirm_fix_loop_rejects_missing_report_or_unknown_issue(tmp_path: Path) -> None:
     client = build_client(tmp_path)
