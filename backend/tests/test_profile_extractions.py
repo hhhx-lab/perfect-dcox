@@ -323,6 +323,54 @@ def test_parse_agent_extraction_output_rejects_invalid_profile_schema() -> None:
         parse_agent_extraction_output(__import__("json").dumps(raw_output, ensure_ascii=False))
 
 
+def test_parse_agent_extraction_output_accepts_valid_yaml() -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_copy(update={"id": "yaml_agent_profile", "status": "draft"})
+    raw_output = {
+        "profile_draft": profile.model_dump(mode="json"),
+        "uncertain_items": [],
+        "evidence": [
+            {
+                "field_path": "fonts.default_chinese",
+                "source": "natural_language",
+                "quote": "宋体",
+                "confidence": 0.88,
+            }
+        ],
+    }
+
+    result = parse_agent_extraction_output(__import__("yaml").safe_dump(raw_output, allow_unicode=True, sort_keys=False))
+
+    assert result.profile_draft.id == "yaml_agent_profile"
+    assert result.evidence[0].source == "natural_language"
+
+
+def test_parse_agent_extraction_output_rejects_missing_required_sections() -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_dump(mode="json")
+
+    with pytest.raises(ExtractionSourceError, match="uncertain_items"):
+        parse_agent_extraction_output(__import__("json").dumps({"profile_draft": profile, "evidence": []}))
+
+
+def test_parse_agent_extraction_output_rejects_unknown_profile_fields() -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_dump(mode="json")
+    profile["prompt"] = "make it pretty"
+    raw_output = {
+        "profile_draft": profile,
+        "uncertain_items": [],
+        "evidence": [
+            {
+                "field_path": "prompt",
+                "source": "natural_language",
+                "quote": "make it pretty",
+                "confidence": 0.2,
+            }
+        ],
+    }
+
+    with pytest.raises(ExtractionSourceError, match="profile_draft"):
+        parse_agent_extraction_output(__import__("json").dumps(raw_output, ensure_ascii=False))
+
+
 def test_profile_extraction_service_completes_natural_language_job(tmp_path) -> None:
     profile = load_builtin_profiles()["ecnu_thesis"].model_copy(update={"id": "service_draft", "status": "draft"})
     raw_output = __import__("json").dumps(
