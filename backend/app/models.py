@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 from app.profiles.models import FormatProfile
 
@@ -129,6 +129,14 @@ class QualityReport(BaseModel):
     issues: list[QualityIssue] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @computed_field
+    @property
+    def issues_by_status(self) -> dict[QualityStatus, list[QualityIssue]]:
+        grouped: dict[QualityStatus, list[QualityIssue]] = {status: [] for status in QUALITY_STATUSES}
+        for issue in self.issues:
+            grouped[issue.status].append(issue)
+        return grouped
 
 
 class FixAction(BaseModel):

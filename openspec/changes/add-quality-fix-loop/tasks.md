@@ -2,7 +2,7 @@
 
 - [x] 1.1 Add quality report, quality issue, fix plan, and fix loop record models.
 - [x] 1.2 Extend the JSON metadata repository with quality report and fix loop persistence.
-- [ ] 1.3 Add repository tests for report grouping, legacy metadata defaults, and fix loop lineage records.
+- [x] 1.3 Add repository tests for report grouping, legacy metadata defaults, and fix loop lineage records.
 
 ## 2. DOCX and PDF Quality Checks
 

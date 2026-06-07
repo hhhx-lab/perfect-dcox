@@ -180,3 +180,34 @@ def test_repository_handles_legacy_metadata_without_quality_collections(tmp_path
     assert repository.get_quality_report("qr_missing") is None
     assert repository.list_quality_fix_loops() == []
     assert repository.get_quality_fix_loop("fl_missing") is None
+
+
+def test_quality_report_serializes_issues_by_status_without_hiding_unsupported() -> None:
+    issues = [
+        QualityIssue(issue_id="issue_pass", status="pass", check_key="docx.open", title="DOCX opens"),
+        QualityIssue(issue_id="issue_warning", status="warning", check_key="pdf.blank", title="Blank page warning"),
+        QualityIssue(issue_id="issue_fail", status="fail", check_key="docx.font", title="Font mismatch"),
+        QualityIssue(
+            issue_id="issue_unsupported",
+            status="unsupported",
+            check_key="docx.page_number",
+            title="Page number cannot be judged",
+            recommendation="Review page numbering manually.",
+        ),
+    ]
+    report = QualityReport(
+        report_id="qr_grouped",
+        job_id="job_grouped",
+        profile_id="ecnu_thesis",
+        profile_version="1.0.0",
+        output_file_ids=["file_docx"],
+        summary=QualitySummary.from_issues(issues),
+        issues=issues,
+    )
+
+    payload = report.model_dump(mode="json")
+
+    assert [issue.issue_id for issue in report.issues_by_status["warning"]] == ["issue_warning"]
+    assert payload["issues_by_status"]["unsupported"][0]["issue_id"] == "issue_unsupported"
+    assert payload["summary"]["remaining_issue_count"] == 3
+    assert payload["summary"]["all_compliant"] is False
