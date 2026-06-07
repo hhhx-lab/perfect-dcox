@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from docx import Document
 
+from app.core.config import Settings
 from app.documents.converter import DocumentConversionError, convert_doc_to_docx
 from app.models import ExtractionSourceType, FileRecord
 from app.storage.repository import JsonMetadataRepository
@@ -21,6 +23,21 @@ class ResolvedExtractionSource:
     source_type: ExtractionSourceType
     text: str
     file_record: FileRecord | None = None
+
+
+class RuleExtractionProvider(Protocol):
+    def extract(self, source_text: str, source_meta: dict[str, str]) -> str:
+        """Return raw structured Agent output for downstream parsing."""
+
+
+class ConfiguredLLMRuleExtractionProvider:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def extract(self, source_text: str, source_meta: dict[str, str]) -> str:
+        if not self.settings.llm_api_key or not self.settings.llm_model:
+            raise ExtractionSourceError("LLM_API_KEY and LLM_MODEL are required for profile extraction.")
+        raise ExtractionSourceError("Live LLM extraction provider is not implemented in this local MVP.")
 
 
 def resolve_extraction_source(

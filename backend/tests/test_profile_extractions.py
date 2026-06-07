@@ -1,7 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from app.agents.extraction import ExtractionSourceError, extract_rule_source_text, resolve_extraction_source
+from app.agents.extraction import (
+    ConfiguredLLMRuleExtractionProvider,
+    ExtractionSourceError,
+    RuleExtractionProvider,
+    extract_rule_source_text,
+    resolve_extraction_source,
+)
+from app.core.config import Settings
 from app.models import ExtractionEvidence, ProfileExtractionRecord, UncertainItem
 from app.models import FileRecord
 from app.profiles.seed import load_builtin_profiles
@@ -235,3 +242,20 @@ def test_extract_rule_source_text_from_doc_uses_conversion(tmp_path, monkeypatch
 
     assert calls == [(legacy_doc, tmp_path / "work", "/opt/homebrew/bin/soffice")]
     assert "第一章 绪论" in text
+
+
+def test_configured_llm_provider_requires_env_configuration(tmp_path) -> None:
+    provider = ConfiguredLLMRuleExtractionProvider(Settings(FILE_STORAGE_ROOT=tmp_path))
+
+    with pytest.raises(ExtractionSourceError, match="LLM_API_KEY and LLM_MODEL"):
+        provider.extract("A4, 小四宋体", {"source_type": "natural_language"})
+
+
+def test_fake_rule_extraction_provider_can_be_injected() -> None:
+    class FakeProvider:
+        def extract(self, source_text: str, source_meta: dict[str, str]) -> str:
+            return f"{source_meta['source_type']}::{source_text}"
+
+    provider: RuleExtractionProvider = FakeProvider()
+
+    assert provider.extract("A4", {"source_type": "natural_language"}) == "natural_language::A4"
