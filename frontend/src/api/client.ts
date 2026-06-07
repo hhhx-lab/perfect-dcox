@@ -161,6 +161,90 @@ export type ProfileExtractionRecord = {
   updated_at: string;
 };
 
+export type QualityStatus = "pass" | "fixed" | "warning" | "fail" | "unsupported";
+export type QualitySeverity = "info" | "low" | "medium" | "high";
+export type FixActionName =
+  | "reapply_profile_formatting"
+  | "apply_table_borders"
+  | "apply_body_paragraph_style"
+  | "apply_heading_style"
+  | "mark_manual_review";
+
+export type QualityIssue = {
+  issue_id: string;
+  status: QualityStatus;
+  check_key: string;
+  title: string;
+  severity: QualitySeverity;
+  description: string | null;
+  profile_rule_ref: string | null;
+  location: string | null;
+  recommendation: string | null;
+  fixable: boolean;
+  details: Record<string, unknown>;
+};
+
+export type QualitySummary = {
+  counts: Record<QualityStatus, number>;
+  remaining_issue_count: number;
+  all_compliant: boolean;
+};
+
+export type QualityReport = {
+  report_id: string;
+  job_id: string | null;
+  profile_id: string;
+  profile_version: string;
+  output_file_ids: string[];
+  summary: QualitySummary;
+  issues: QualityIssue[];
+  issues_by_status: Record<QualityStatus, QualityIssue[]>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type IssueExplanation = {
+  issue_id: string;
+  reason: string;
+  impact: string;
+  automatic_repair_allowed: boolean;
+  manual_review_guidance: string;
+};
+
+export type FixAction = {
+  action: FixActionName;
+  target_issue_ids: string[];
+  params: Record<string, unknown>;
+  requires_user_confirmation: boolean;
+};
+
+export type FixPlan = {
+  fix_plan_id: string;
+  report_id: string;
+  actions: FixAction[];
+  explanations: IssueExplanation[];
+  manual_review_issue_ids: string[];
+  explanation: string | null;
+  created_at: string;
+  updated_at: string;
+  requires_user_confirmation: boolean;
+};
+
+export type FixLoopRecord = {
+  fix_loop_id: string;
+  original_report_id: string;
+  fix_plan_id: string;
+  selected_issue_ids: string[];
+  selected_actions: FixAction[];
+  status: "pending_confirmation" | "confirmed" | "running" | "completed" | "failed";
+  new_job_id: string | null;
+  new_output_file_ids: string[];
+  updated_report_id: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -207,6 +291,32 @@ export const apiClient = {
     }),
   getProfileExtraction: (extractionId: string) =>
     requestJson<ProfileExtractionRecord>(`/profile-extractions/${extractionId}`),
+  createQualityReport: (payload: {
+    profile_id: string;
+    profile_version: string;
+    output_file_ids: string[];
+    job_id?: string | null;
+  }) =>
+    requestJson<QualityReport>("/quality-reports", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
+  getQualityReport: (reportId: string) => requestJson<QualityReport>(`/quality-reports/${reportId}`),
+  createFixPlan: (reportId: string) =>
+    requestJson<FixPlan>(`/quality-reports/${reportId}/fix-plan`, {
+      method: "POST",
+    }),
+  confirmFixLoop: (reportId: string, payload: { fix_plan_id: string; selected_issue_ids: string[] }) =>
+    requestJson<FixLoopRecord>(`/quality-reports/${reportId}/fix-loops`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
   listProfiles: () => requestJson<ProfileSummary[]>("/profiles"),
   getProfile: (profileId: string, version: string) =>
     requestJson<FormatProfile>(`/profiles/${profileId}/versions/${version}`),
