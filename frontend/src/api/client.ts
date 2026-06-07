@@ -34,6 +34,23 @@ export type JobRecord = {
   updated_at: string;
 };
 
+export type ExtractionStatus = "queued" | "running" | "completed" | "failed" | "needs_review";
+export type ExtractionSourceType = "document" | "natural_language";
+
+export type ExtractionEvidence = {
+  field_path: string;
+  source: ExtractionSourceType;
+  quote: string | null;
+  note: string | null;
+  confidence: number;
+};
+
+export type UncertainItem = {
+  field_path: string;
+  message: string;
+  suggestion: string;
+};
+
 export type ProfileStatus = "draft" | "active" | "archived";
 export type ProfileSource = "system" | "user" | "imported";
 
@@ -130,6 +147,20 @@ export type FormatProfile = {
   };
 };
 
+export type ProfileExtractionRecord = {
+  extraction_id: string;
+  source_type: ExtractionSourceType;
+  file_id: string | null;
+  natural_language: string | null;
+  status: ExtractionStatus;
+  profile_draft: FormatProfile | null;
+  uncertain_items: UncertainItem[];
+  evidence: ExtractionEvidence[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -162,6 +193,20 @@ export const apiClient = {
     }),
   getFile: (fileId: string) => requestJson<FileRecord>(`/files/${fileId}`),
   getJob: (jobId: string) => requestJson<JobRecord>(`/jobs/${jobId}`),
+  createProfileExtraction: (payload: {
+    source_type: ExtractionSourceType;
+    file_id?: string | null;
+    natural_language?: string | null;
+  }) =>
+    requestJson<ProfileExtractionRecord>("/profile-extractions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
+  getProfileExtraction: (extractionId: string) =>
+    requestJson<ProfileExtractionRecord>(`/profile-extractions/${extractionId}`),
   listProfiles: () => requestJson<ProfileSummary[]>("/profiles"),
   getProfile: (profileId: string, version: string) =>
     requestJson<FormatProfile>(`/profiles/${profileId}/versions/${version}`),
