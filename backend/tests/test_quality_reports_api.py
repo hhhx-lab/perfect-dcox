@@ -80,3 +80,67 @@ def test_create_quality_report_rejects_missing_output_or_profile(tmp_path: Path)
 
     assert missing_output.status_code == 400
     assert missing_profile.status_code == 400
+
+
+def test_create_fix_plan_and_confirm_fix_loop_requires_user_confirmation(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    file_id = add_formatted_docx_output(tmp_path)
+    report = client.post(
+        "/api/quality-reports",
+        json={
+            "profile_id": "ecnu_thesis",
+            "profile_version": "1.0.0",
+            "output_file_ids": [file_id],
+            "job_id": "job_quality",
+        },
+    ).json()
+
+    plan_response = client.post(f"/api/quality-reports/{report['report_id']}/fix-plan")
+
+    assert plan_response.status_code == 201
+    plan = plan_response.json()
+    assert plan["fix_plan_id"].startswith("fp_")
+    assert plan["report_id"] == report["report_id"]
+    assert plan["explanations"]
+    assert plan["manual_review_issue_ids"]
+
+    confirm_response = client.post(
+        f"/api/quality-reports/{report['report_id']}/fix-loops",
+        json={
+            "fix_plan_id": plan["fix_plan_id"],
+            "selected_issue_ids": plan["manual_review_issue_ids"][:1],
+        },
+    )
+
+    assert confirm_response.status_code == 201
+    loop = confirm_response.json()
+    assert loop["fix_loop_id"].startswith("fl_")
+    assert loop["original_report_id"] == report["report_id"]
+    assert loop["fix_plan_id"] == plan["fix_plan_id"]
+    assert loop["status"] == "confirmed"
+    assert loop["new_job_id"] is None
+    assert loop["new_output_file_ids"] == []
+    assert loop["updated_report_id"] is None
+
+
+def test_confirm_fix_loop_rejects_missing_report_or_unknown_issue(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    file_id = add_formatted_docx_output(tmp_path)
+    report = client.post(
+        "/api/quality-reports",
+        json={
+            "profile_id": "ecnu_thesis",
+            "profile_version": "1.0.0",
+            "output_file_ids": [file_id],
+        },
+    ).json()
+    plan = client.post(f"/api/quality-reports/{report['report_id']}/fix-plan").json()
+
+    missing_report = client.post("/api/quality-reports/qr_missing/fix-plan")
+    unknown_issue = client.post(
+        f"/api/quality-reports/{report['report_id']}/fix-loops",
+        json={"fix_plan_id": plan["fix_plan_id"], "selected_issue_ids": ["missing_issue"]},
+    )
+
+    assert missing_report.status_code == 404
+    assert unknown_issue.status_code == 400
