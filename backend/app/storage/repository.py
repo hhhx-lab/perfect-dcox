@@ -5,7 +5,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from app.models import FileRecord, JobRecord, ProfileExtractionRecord, utc_now
+from app.models import FileRecord, FixLoopRecord, JobRecord, ProfileExtractionRecord, QualityReport, utc_now
 from app.profiles.models import FormatProfile, ProfileSummary
 
 
@@ -19,7 +19,15 @@ class JsonMetadataRepository:
         self._lock = Lock()
 
     def _empty(self) -> dict[str, dict[str, Any]]:
-        return {"files": {}, "jobs": {}, "profiles": {}, "profile_versions": {}, "profile_extractions": {}}
+        return {
+            "files": {},
+            "jobs": {},
+            "profiles": {},
+            "profile_versions": {},
+            "profile_extractions": {},
+            "quality_reports": {},
+            "quality_fix_loops": {},
+        }
 
     def _load(self) -> dict[str, dict[str, Any]]:
         if not self.metadata_path.exists():
@@ -31,6 +39,8 @@ class JsonMetadataRepository:
             "profiles": data.get("profiles", {}),
             "profile_versions": data.get("profile_versions", {}),
             "profile_extractions": data.get("profile_extractions", {}),
+            "quality_reports": data.get("quality_reports", {}),
+            "quality_fix_loops": data.get("quality_fix_loops", {}),
         }
 
     def _save(self, data: dict[str, dict[str, Any]]) -> None:
@@ -100,6 +110,54 @@ class JsonMetadataRepository:
         with self._lock:
             data = self._load()
             data["profile_extractions"][record.extraction_id] = record.model_dump(mode="json")
+            self._save(data)
+        return record
+
+    def add_quality_report(self, report: QualityReport) -> QualityReport:
+        with self._lock:
+            data = self._load()
+            data["quality_reports"][report.report_id] = report.model_dump(mode="json")
+            self._save(data)
+        return report
+
+    def get_quality_report(self, report_id: str) -> QualityReport | None:
+        data = self._load()
+        raw = data["quality_reports"].get(report_id)
+        return QualityReport.model_validate(raw) if raw else None
+
+    def list_quality_reports(self) -> list[QualityReport]:
+        data = self._load()
+        return [QualityReport.model_validate(raw) for raw in data["quality_reports"].values()]
+
+    def update_quality_report(self, report: QualityReport) -> QualityReport:
+        report.updated_at = utc_now()
+        with self._lock:
+            data = self._load()
+            data["quality_reports"][report.report_id] = report.model_dump(mode="json")
+            self._save(data)
+        return report
+
+    def add_quality_fix_loop(self, record: FixLoopRecord) -> FixLoopRecord:
+        with self._lock:
+            data = self._load()
+            data["quality_fix_loops"][record.fix_loop_id] = record.model_dump(mode="json")
+            self._save(data)
+        return record
+
+    def get_quality_fix_loop(self, fix_loop_id: str) -> FixLoopRecord | None:
+        data = self._load()
+        raw = data["quality_fix_loops"].get(fix_loop_id)
+        return FixLoopRecord.model_validate(raw) if raw else None
+
+    def list_quality_fix_loops(self) -> list[FixLoopRecord]:
+        data = self._load()
+        return [FixLoopRecord.model_validate(raw) for raw in data["quality_fix_loops"].values()]
+
+    def update_quality_fix_loop(self, record: FixLoopRecord) -> FixLoopRecord:
+        record.updated_at = utc_now()
+        with self._lock:
+            data = self._load()
+            data["quality_fix_loops"][record.fix_loop_id] = record.model_dump(mode="json")
             self._save(data)
         return record
 

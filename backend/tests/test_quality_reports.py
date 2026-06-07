@@ -9,6 +9,7 @@ from app.models import (
     QualityReport,
     QualitySummary,
 )
+from app.storage.repository import JsonMetadataRepository
 
 
 def test_quality_report_models_serialize_status_groups_and_issue_metadata() -> None:
@@ -112,3 +113,70 @@ def test_quality_and_fix_models_reject_unknown_statuses() -> None:
             selected_actions=[],
             status="done",
         )
+
+
+def test_repository_persists_quality_reports_and_fix_loop_lineage(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    issue = QualityIssue(
+        issue_id="issue_font",
+        status="warning",
+        check_key="docx.body.font",
+        title="Body font needs review.",
+        profile_rule_ref="body.font",
+        location="paragraph[2]",
+        recommendation="Apply body paragraph style.",
+        fixable=True,
+    )
+    report = QualityReport(
+        report_id="qr_123",
+        job_id="job_123",
+        profile_id="ecnu_thesis",
+        profile_version="1.0.0",
+        output_file_ids=["file_docx"],
+        summary=QualitySummary.from_issues([issue]),
+        issues=[issue],
+    )
+    action = FixAction(action="apply_body_paragraph_style", target_issue_ids=["issue_font"])
+    loop = FixLoopRecord(
+        fix_loop_id="fl_123",
+        original_report_id="qr_123",
+        fix_plan_id="fp_123",
+        selected_issue_ids=["issue_font"],
+        selected_actions=[action],
+        status="confirmed",
+    )
+
+    repository.add_quality_report(report)
+    repository.add_quality_fix_loop(loop)
+    loaded_report = JsonMetadataRepository(tmp_path / "metadata.json").get_quality_report("qr_123")
+    loaded_loop = JsonMetadataRepository(tmp_path / "metadata.json").get_quality_fix_loop("fl_123")
+
+    assert loaded_report == report
+    assert loaded_loop == loop
+    assert loaded_report.summary.counts["warning"] == 1
+
+    loaded_loop.status = "completed"
+    loaded_loop.new_job_id = "job_fix_123"
+    loaded_loop.new_output_file_ids = ["file_fixed_docx"]
+    loaded_loop.updated_report_id = "qr_fixed"
+    updated_loop = repository.update_quality_fix_loop(loaded_loop)
+
+    reloaded_loop = JsonMetadataRepository(tmp_path / "metadata.json").get_quality_fix_loop("fl_123")
+    assert reloaded_loop == updated_loop
+    assert reloaded_loop.original_report_id == "qr_123"
+    assert reloaded_loop.updated_report_id == "qr_fixed"
+    assert updated_loop.updated_at >= loop.updated_at
+
+
+def test_repository_handles_legacy_metadata_without_quality_collections(tmp_path) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text(
+        '{"files": {}, "jobs": {}, "profiles": {}, "profile_versions": {}, "profile_extractions": {}}',
+        encoding="utf-8",
+    )
+    repository = JsonMetadataRepository(metadata_path)
+
+    assert repository.list_quality_reports() == []
+    assert repository.get_quality_report("qr_missing") is None
+    assert repository.list_quality_fix_loops() == []
+    assert repository.get_quality_fix_loop("fl_missing") is None
