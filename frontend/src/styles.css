@@ -234,6 +234,77 @@ p {
   font-weight: 700;
 }
 
+.job-panel {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 24px;
+  border: 1px solid #d4c7b5;
+  border-radius: 8px;
+  padding: 18px;
+  background: #f7f1e4;
+}
+
+.job-panel p {
+  margin-bottom: 0;
+}
+
+.job-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.job-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 14px;
+  background: #2f6564;
+  color: #fffdf7;
+}
+
+.job-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.job-status {
+  border-top: 1px solid #d4c7b5;
+  padding-top: 14px;
+}
+
+.job-status dl {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.status-badge {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: #4a4238;
+  color: #fffdf7;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.status-badge.completed {
+  background: #2f6564;
+}
+
+.status-badge.failed {
+  background: #8b2d2d;
+}
+
+.status-badge.running {
+  background: #6d4d2f;
+}
+
 .area-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(150px, 1fr));

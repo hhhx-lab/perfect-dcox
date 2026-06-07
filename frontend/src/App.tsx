@@ -4,10 +4,11 @@ import {
   FolderOpen,
   LayoutDashboard,
   ListChecks,
+  RefreshCcw,
   Upload,
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import { apiClient, FileRecord, ServiceHealth } from "./api/client";
+import { apiClient, FileRecord, JobRecord, ServiceHealth } from "./api/client";
 
 const workbenchAreas = [
   {
@@ -42,8 +43,12 @@ function App() {
   const [healthError, setHealthError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadedFile, setUploadedFile] = useState<FileRecord | null>(null);
+  const [job, setJob] = useState<JobRecord | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [jobError, setJobError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isCreatingJob, setIsCreatingJob] = useState(false);
+  const [isRefreshingJob, setIsRefreshingJob] = useState(false);
 
   useEffect(() => {
     apiClient
@@ -77,11 +82,46 @@ function App() {
     try {
       const record = await apiClient.uploadFile(selectedFile);
       setUploadedFile(record);
+      setJob(null);
+      setJobError(null);
     } catch (error) {
       setUploadedFile(null);
       setUploadError(error instanceof Error ? error.message : "上传失败。");
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const createJob = async () => {
+    if (!uploadedFile) {
+      setJobError("请先上传 Word 文件。");
+      return;
+    }
+    setIsCreatingJob(true);
+    setJobError(null);
+    try {
+      const created = await apiClient.createJob(uploadedFile.file_id);
+      setJob(created);
+    } catch (error) {
+      setJobError(error instanceof Error ? error.message : "创建任务失败。");
+    } finally {
+      setIsCreatingJob(false);
+    }
+  };
+
+  const refreshJob = async () => {
+    if (!job) {
+      return;
+    }
+    setIsRefreshingJob(true);
+    setJobError(null);
+    try {
+      const latest = await apiClient.getJob(job.job_id);
+      setJob(latest);
+    } catch (error) {
+      setJobError(error instanceof Error ? error.message : "刷新任务失败。");
+    } finally {
+      setIsRefreshingJob(false);
     }
   };
 
@@ -173,6 +213,55 @@ function App() {
             )}
           </section>
         )}
+
+        <section className="job-panel" id="任务" aria-labelledby="job-title">
+          <div>
+            <p className="eyebrow">Task</p>
+            <h2 id="job-title">占位排版任务</h2>
+            <p>创建任务后会进入 queued 状态，等待后端 placeholder worker 处理。</p>
+          </div>
+          <div className="job-actions">
+            <button type="button" onClick={createJob} disabled={!uploadedFile || isCreatingJob}>
+              <ListChecks size={18} aria-hidden="true" />
+              {isCreatingJob ? "创建中" : "创建任务"}
+            </button>
+            <button type="button" onClick={refreshJob} disabled={!job || isRefreshingJob}>
+              <RefreshCcw size={18} aria-hidden="true" />
+              {isRefreshingJob ? "刷新中" : "刷新状态"}
+            </button>
+          </div>
+          {(job || jobError) && (
+            <div className="job-status" aria-live="polite">
+              {job ? (
+                <>
+                  <span className={`status-badge ${job.status}`}>{job.status}</span>
+                  <dl>
+                    <div>
+                      <dt>job_id</dt>
+                      <dd>{job.job_id}</dd>
+                    </div>
+                    <div>
+                      <dt>progress</dt>
+                      <dd>{job.progress}%</dd>
+                    </div>
+                    <div>
+                      <dt>current_step</dt>
+                      <dd>{job.current_step || "N/A"}</dd>
+                    </div>
+                    {job.error_message && (
+                      <div>
+                        <dt>error</dt>
+                        <dd>{job.error_message}</dd>
+                      </div>
+                    )}
+                  </dl>
+                </>
+              ) : (
+                <p className="error-text">{jobError}</p>
+              )}
+            </div>
+          )}
+        </section>
 
         <section className="area-grid" aria-label="工作台模块">
           {workbenchAreas.map((area) => {

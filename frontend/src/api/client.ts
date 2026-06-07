@@ -54,6 +54,14 @@ export const apiClient = {
       body: formData,
     });
   },
+  createJob: (fileId: string) =>
+    requestJson<JobRecord>("/jobs", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ input_file_id: fileId }),
+    }),
   getFile: (fileId: string) => requestJson<FileRecord>(`/files/${fileId}`),
   getJob: (jobId: string) => requestJson<JobRecord>(`/jobs/${jobId}`),
 };
