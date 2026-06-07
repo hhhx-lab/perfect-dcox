@@ -46,4 +46,4 @@ def _is_heading_candidate(text: str, style_name: str) -> bool:
     stripped = text.strip()
     if style_name.lower().startswith("heading") or style_name.startswith("标题"):
         return True
-    return bool(re.match(r"^(第[一二三四五六七八九十百0-9]+[章节]|[0-9]+(\\.[0-9]+)*\\s+)", stripped))
+    return bool(re.match(r"^(第[一二三四五六七八九十百0-9]+[章节]|[0-9]+(\.[0-9]+)*\s+)", stripped))

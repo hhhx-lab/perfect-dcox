@@ -5,6 +5,7 @@ import re
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt
 
@@ -23,14 +24,28 @@ def format_docx_with_profile(input_path: Path, output_path: Path, profile: Forma
         raise DocumentFormatError(f"DOCX formatting failed to open input: {exc}") from exc
 
     _apply_page_settings(document, profile)
+    in_references = False
     for paragraph in document.paragraphs:
+        stripped = paragraph.text.strip()
+        if stripped in {"参考文献", "References"}:
+            in_references = True
         heading = _matching_heading(profile, paragraph.text, paragraph.style.name if paragraph.style else "")
         if heading:
             paragraph.style = f"Heading {heading.level}"
             _apply_paragraph_alignment(paragraph, heading.alignment)
             _apply_runs_font(paragraph, heading.font)
+        elif _is_table_caption(stripped):
+            _apply_caption_paragraph(paragraph, profile.table.caption.font)
+        elif _is_figure_caption(stripped):
+            _apply_caption_paragraph(paragraph, profile.figure.caption.font)
+        elif _is_equation(stripped):
+            _apply_equation_paragraph(paragraph, profile)
+        elif in_references and stripped and stripped != "参考文献":
+            _apply_reference_paragraph(paragraph, profile)
         else:
             _apply_body_paragraph(paragraph, profile)
+    for table in document.tables:
+        _apply_basic_three_line_table(table)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     document.save(output_path)
@@ -55,17 +70,36 @@ def _apply_body_paragraph(paragraph, profile: FormatProfile) -> None:
     _apply_runs_font(paragraph, profile.body.font)
 
 
+def _apply_caption_paragraph(paragraph, font: TextFont) -> None:
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    paragraph.paragraph_format.line_spacing = 1.0
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _apply_runs_font(paragraph, font)
+
+
+def _apply_equation_paragraph(paragraph, profile: FormatProfile) -> None:
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    _apply_paragraph_alignment(paragraph, profile.equations.alignment)
+
+
+def _apply_reference_paragraph(paragraph, profile: FormatProfile) -> None:
+    paragraph.paragraph_format.left_indent = Cm(profile.references.hanging_indent_chars * 0.37)
+    paragraph.paragraph_format.first_line_indent = Cm(-profile.references.hanging_indent_chars * 0.37)
+    paragraph.paragraph_format.line_spacing = profile.body.line_spacing
+    _apply_runs_font(paragraph, profile.references.font)
+
+
 def _matching_heading(profile: FormatProfile, text: str, style_name: str) -> HeadingSettings | None:
     stripped = text.strip()
     if not stripped:
         return None
     level = None
     if style_name.lower().startswith("heading"):
-        match = re.search(r"(\\d+)", style_name)
+        match = re.search(r"(\d+)", style_name)
         level = int(match.group(1)) if match else 1
     elif re.match(r"^第[一二三四五六七八九十百0-9]+[章节]", stripped):
         level = 1
-    elif re.match(r"^[0-9]+\\.[0-9]+", stripped):
+    elif re.match(r"^[0-9]+\.[0-9]+", stripped):
         level = 2
     if level is None:
         return None
@@ -89,3 +123,36 @@ def _apply_paragraph_alignment(paragraph, alignment: TextAlignment) -> None:
         "justified": WD_ALIGN_PARAGRAPH.JUSTIFY,
     }
     paragraph.alignment = mapping[alignment]
+
+
+def _is_table_caption(text: str) -> bool:
+    return bool(re.match(r"^(表\s*\d+|Table\s+\d+)", text, re.IGNORECASE))
+
+
+def _is_figure_caption(text: str) -> bool:
+    return bool(re.match(r"^(图\s*\d+|Figure\s+\d+)", text, re.IGNORECASE))
+
+
+def _is_equation(text: str) -> bool:
+    if not text:
+        return False
+    return any(symbol in text for symbol in ("=", "＋", "+", "-", "*", "/", "^")) and len(text) <= 120
+
+
+def _apply_basic_three_line_table(table) -> None:
+    tbl_pr = table._tbl.tblPr
+    borders = tbl_pr.first_child_found_in("w:tblBorders")
+    if borders is not None:
+        tbl_pr.remove(borders)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "bottom", "insideH"):
+        element = OxmlElement(f"w:{edge}")
+        element.set(qn("w:val"), "single")
+        element.set(qn("w:sz"), "8")
+        element.set(qn("w:color"), "000000")
+        borders.append(element)
+    for edge in ("left", "right", "insideV"):
+        element = OxmlElement(f"w:{edge}")
+        element.set(qn("w:val"), "nil")
+        borders.append(element)
+    tbl_pr.append(borders)
