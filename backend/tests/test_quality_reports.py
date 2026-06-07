@@ -14,7 +14,9 @@ from app.models import (
 )
 from app.profiles.seed import load_builtin_profiles
 from app.quality.inspection import inspect_docx_quality, inspect_pdf_quality
+from app.quality.service import QualityReportService
 from app.storage.repository import JsonMetadataRepository
+from app.storage.local import LocalFileStorage
 from tests.document_fixtures import create_minimal_thesis_docx
 
 
@@ -299,3 +301,45 @@ def test_pdf_quality_inspection_flags_unreadable_and_blank_pdf(tmp_path) -> None
     assert blank_by_key["pdf.openability"].status == "pass"
     assert blank_by_key["pdf.text_extractability"].status == "fail"
     assert blank_by_key["pdf.blank_pages"].status == "warning"
+
+
+def test_quality_report_service_generates_and_persists_status_summary(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    storage = LocalFileStorage(tmp_path)
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    repository.save_profile_version(profile)
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    docx_record = storage.store_generated_file(
+        formatted,
+        filename="formatted.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    repository.add_file(docx_record)
+    pdf = tmp_path / "blank.pdf"
+    pdf.write_bytes(
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >> endobj\n"
+        b"4 0 obj << /Length 0 >> stream\n\nendstream endobj\n"
+        b"%%EOF"
+    )
+    pdf_record = storage.store_generated_file(pdf, filename="formatted.pdf", mime_type="application/pdf")
+    repository.add_file(pdf_record)
+
+    report = QualityReportService(repository).create_report(
+        profile_id="ecnu_thesis",
+        profile_version="1.0.0",
+        output_file_ids=[docx_record.file_id, pdf_record.file_id],
+        job_id="job_quality",
+    )
+
+    assert repository.get_quality_report(report.report_id) == report
+    assert report.job_id == "job_quality"
+    assert report.summary.counts["pass"] >= 6
+    assert report.summary.counts["warning"] >= 1
+    assert report.summary.counts["fail"] >= 1
+    assert report.summary.counts["unsupported"] >= 1
+    assert report.summary.all_compliant is False
+    assert report.issues_by_status["unsupported"][0].check_key == "docx.page_number"
