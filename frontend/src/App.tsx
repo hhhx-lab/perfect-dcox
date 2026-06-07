@@ -68,11 +68,15 @@ function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadedFile, setUploadedFile] = useState<FileRecord | null>(null);
   const [job, setJob] = useState<JobRecord | null>(null);
+  const [outputFiles, setOutputFiles] = useState<FileRecord[]>([]);
+  const [outputError, setOutputError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isCreatingJob, setIsCreatingJob] = useState(false);
   const [isRefreshingJob, setIsRefreshingJob] = useState(false);
+  const [isLoadingOutputs, setIsLoadingOutputs] = useState(false);
+  const outputFileIdsKey = job?.output_file_ids.join("|") ?? "";
 
   useEffect(() => {
     apiClient
@@ -133,6 +137,41 @@ function App() {
         setProfileError(error.message);
       });
   }, [selectedProfileKey]);
+
+  useEffect(() => {
+    const outputIds = job?.output_file_ids ?? [];
+    if (outputIds.length === 0) {
+      setOutputFiles([]);
+      setOutputError(null);
+      setIsLoadingOutputs(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingOutputs(true);
+    setOutputError(null);
+    void Promise.allSettled(outputIds.map((fileId) => apiClient.getFile(fileId))).then((results) => {
+      if (cancelled) {
+        return;
+      }
+      const loadedFiles: FileRecord[] = [];
+      const failedIds: string[] = [];
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          loadedFiles.push(result.value);
+        } else {
+          failedIds.push(outputIds[index]);
+        }
+      });
+      setOutputFiles(loadedFiles);
+      setOutputError(failedIds.length > 0 ? `部分输出元数据加载失败：${failedIds.join(", ")}` : null);
+      setIsLoadingOutputs(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [outputFileIdsKey, job]);
 
   const updateProfileDraft = (mutator: (draft: FormatProfile) => void) => {
     setProfileDraft((current) => {
@@ -250,6 +289,8 @@ function App() {
       const record = await apiClient.uploadFile(selectedFile);
       setUploadedFile(record);
       setJob(null);
+      setOutputFiles([]);
+      setOutputError(null);
       setJobError(null);
     } catch (error) {
       setUploadedFile(null);
@@ -276,6 +317,8 @@ function App() {
           : undefined;
       const created = await apiClient.createJob(uploadedFile.file_id, profileRef);
       setJob(created);
+      setOutputFiles([]);
+      setOutputError(null);
     } catch (error) {
       setJobError(error instanceof Error ? error.message : "创建任务失败。");
     } finally {
@@ -787,6 +830,27 @@ function App() {
                       </div>
                     )}
                   </dl>
+                  {job.output_file_ids.length > 0 && (
+                    <section className="output-section" aria-label="任务输出文件">
+                      <div className="output-heading">
+                        <FolderOpen size={18} aria-hidden="true" />
+                        <h3>输出文件</h3>
+                      </div>
+                      {isLoadingOutputs && <p className="muted">正在读取输出文件元数据。</p>}
+                      {outputError && <p className="error-text">{outputError}</p>}
+                      {outputFiles.length > 0 && (
+                        <ul className="output-list">
+                          {outputFiles.map((file) => (
+                            <li key={file.file_id}>
+                              <strong>{file.filename}</strong>
+                              <span>{file.size} bytes</span>
+                              <code>{file.file_id}</code>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </section>
+                  )}
                 </>
               ) : (
                 <p className="error-text">{jobError}</p>
