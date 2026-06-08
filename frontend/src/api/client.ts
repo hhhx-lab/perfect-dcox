@@ -25,7 +25,14 @@ export type JobRecord = {
   input_file_id: string;
   profile_id: string | null;
   profile_version: string | null;
-  status: "queued" | "running" | "completed" | "failed";
+  status:
+    | "queued"
+    | "running"
+    | "completed"
+    | "quality_failed"
+    | "manual_review_required"
+    | "export_failed"
+    | "failed";
   progress: number;
   current_step: string | null;
   output_file_ids: string[];
@@ -34,8 +41,49 @@ export type JobRecord = {
   updated_at: string;
 };
 
+export type DeliveryManifestItem = {
+  input_file_id: string;
+  job_id: string;
+  final_docx_file_id: string | null;
+  final_pdf_file_id: string | null;
+  quality_report_id: string | null;
+  fix_loop_ids: string[];
+  download_urls: Record<string, string>;
+  delivery_status: "completed" | "manual_review_required" | "failed";
+};
+
+export type BatchFormatRun = {
+  batch_id: string;
+  profile_id: string;
+  profile_version: string;
+  input_file_ids: string[];
+  job_ids: string[];
+  status:
+    | "queued"
+    | "running"
+    | "partially_completed"
+    | "completed"
+    | "quality_failed"
+    | "manual_review_required"
+    | "export_failed"
+    | "failed";
+  delivery_manifest_id: string | null;
+  manifest_download_url: string | null;
+  items: DeliveryManifestItem[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type ExtractionStatus = "queued" | "running" | "completed" | "failed" | "needs_review";
 export type ExtractionSourceType = "document" | "natural_language";
+export type RequirementSessionSourceType = "conversation" | "document";
+export type RequirementSessionStatus =
+  | "collecting"
+  | "needs_user_answer"
+  | "ready_for_confirmation"
+  | "confirmed"
+  | "failed";
 
 export type ExtractionEvidence = {
   field_path: string;
@@ -68,6 +116,7 @@ export type TextFont = {
   latin: string;
   size_pt: number;
   weight: "normal" | "bold";
+  color: string;
 };
 
 export type FormatProfile = {
@@ -137,6 +186,13 @@ export type FormatProfile = {
     font: TextFont;
     hanging_indent_chars: number;
   };
+  header_footer: {
+    header_text: string | null;
+    header_alignment: "left" | "center" | "right" | "justified";
+    footer_page_number: boolean;
+    footer_alignment: "left" | "center" | "right" | "justified";
+    font: TextFont;
+  };
   quality: {
     check_margins: boolean;
     check_fonts: boolean;
@@ -156,6 +212,47 @@ export type ProfileExtractionRecord = {
   profile_draft: FormatProfile | null;
   uncertain_items: UncertainItem[];
   evidence: ExtractionEvidence[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RequirementSessionMessage = {
+  role: "user" | "agent" | "system";
+  content: string;
+  created_at: string;
+};
+
+export type RequirementRuleItem = {
+  field_path: string;
+  label: string;
+  value: string;
+  source: "conversation" | "document" | "system_default" | "user_confirmed";
+  confidence: number;
+  evidence: string[];
+  needs_confirmation: boolean;
+  supported: boolean;
+};
+
+export type RequirementSummary = {
+  items: RequirementRuleItem[];
+  missing_fields: string[];
+  unsupported_or_uncertain_rules: UncertainItem[];
+};
+
+export type RequirementSession = {
+  session_id: string;
+  source_type: RequirementSessionSourceType;
+  status: RequirementSessionStatus;
+  file_id: string | null;
+  natural_language: string | null;
+  messages: RequirementSessionMessage[];
+  missing_fields: string[];
+  requirement_summary: RequirementSummary | null;
+  profile_draft: FormatProfile | null;
+  evidence: ExtractionEvidence[];
+  uncertain_items: UncertainItem[];
+  confirmed_profile_id: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
@@ -250,7 +347,14 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
   if (!response.ok) {
-    const message = await response.text();
+    const raw = await response.text();
+    let message = raw;
+    try {
+      const parsed = JSON.parse(raw) as { detail?: unknown };
+      if (typeof parsed.detail === "string") message = parsed.detail;
+    } catch {
+      message = raw;
+    }
     throw new Error(message || `Request failed with ${response.status}`);
   }
   return response.json() as Promise<T>;
@@ -274,8 +378,26 @@ export const apiClient = {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ input_file_id: fileId, ...profile }),
+  }),
+  createBatch: (payload: {
+    profile_id: string;
+    profile_version: string;
+    input_file_ids: string[];
+    output_formats: Array<"docx" | "pdf">;
+    auto_quality: boolean;
+    auto_fix?: boolean;
+  }) =>
+    requestJson<BatchFormatRun>("/batches", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
     }),
+  getBatch: (batchId: string) => requestJson<BatchFormatRun>(`/batches/${batchId}`),
+  downloadBatchManifestUrl: (batchId: string) => `${API_BASE_URL}/batches/${batchId}/manifest`,
   getFile: (fileId: string) => requestJson<FileRecord>(`/files/${fileId}`),
+  downloadFileUrl: (fileId: string) => `${API_BASE_URL}/files/${fileId}/download`,
   getJob: (jobId: string) => requestJson<JobRecord>(`/jobs/${jobId}`),
   createProfileExtraction: (payload: {
     source_type: ExtractionSourceType;
@@ -291,6 +413,38 @@ export const apiClient = {
     }),
   getProfileExtraction: (extractionId: string) =>
     requestJson<ProfileExtractionRecord>(`/profile-extractions/${extractionId}`),
+  createRequirementSession: (payload: {
+    source_type: RequirementSessionSourceType;
+    file_id?: string | null;
+    natural_language?: string | null;
+  }) =>
+    requestJson<RequirementSession>("/requirement-sessions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
+  getRequirementSession: (sessionId: string) => requestJson<RequirementSession>(`/requirement-sessions/${sessionId}`),
+  addRequirementMessage: (sessionId: string, content: string) =>
+    requestJson<RequirementSession>(`/requirement-sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ content }),
+    }),
+  confirmRequirementSession: (
+    sessionId: string,
+    payload: { profile_name: string; profile_version: string; profile_description?: string | null },
+  ) =>
+    requestJson<RequirementSession>(`/requirement-sessions/${sessionId}/confirm`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
   createQualityReport: (payload: {
     profile_id: string;
     profile_version: string;
@@ -305,6 +459,8 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
   getQualityReport: (reportId: string) => requestJson<QualityReport>(`/quality-reports/${reportId}`),
+  downloadQualityReportUrl: (reportId: string, format: "json" | "markdown") =>
+    `${API_BASE_URL}/quality-reports/${reportId}/download?format=${format}`,
   createFixPlan: (reportId: string) =>
     requestJson<FixPlan>(`/quality-reports/${reportId}/fix-plan`, {
       method: "POST",
@@ -316,6 +472,10 @@ export const apiClient = {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
+    }),
+  executeFixLoop: (reportId: string, fixLoopId: string) =>
+    requestJson<FixLoopRecord>(`/quality-reports/${reportId}/fix-loops/${fixLoopId}/execute`, {
+      method: "POST",
     }),
   listProfiles: () => requestJson<ProfileSummary[]>("/profiles"),
   getProfile: (profileId: string, version: string) =>

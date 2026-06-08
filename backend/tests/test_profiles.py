@@ -108,6 +108,18 @@ def valid_profile_payload() -> dict[str, object]:
             },
             "hanging_indent_chars": 2,
         },
+        "header_footer": {
+            "header_text": None,
+            "header_alignment": "center",
+            "footer_page_number": True,
+            "footer_alignment": "center",
+            "font": {
+                "chinese": "SimSun",
+                "latin": "Times New Roman",
+                "size_pt": 10.5,
+                "weight": "normal",
+            },
+        },
         "quality": {
             "check_margins": True,
             "check_fonts": True,
@@ -180,6 +192,7 @@ def test_ecnu_builtin_profile_is_loaded_from_yaml() -> None:
     assert ecnu.abstract.length_range_chars.max == 500
     assert ecnu.table.caption.position == "above"
     assert ecnu.figure.caption.position == "below"
+    assert ecnu.header_footer.footer_page_number is True
     assert ecnu.quality.check_fonts is True
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import subprocess
 
 
@@ -22,17 +23,21 @@ def convert_doc_to_docx(input_path: Path, output_dir: Path, soffice_bin: str | N
         raise DocumentConversionError(f"Input file does not exist: {input_path}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    command = [
-        str(soffice_path),
-        "--headless",
-        "--convert-to",
-        "docx",
-        "--outdir",
-        str(output_dir),
-        str(input_path),
-    ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
     output_path = output_dir / f"{input_path.stem}.docx"
+    if output_path.exists():
+        output_path.unlink()
+    with TemporaryDirectory(prefix="word-format-agent-lo-") as profile_dir:
+        command = [
+            str(soffice_path),
+            f"-env:UserInstallation=file://{profile_dir}",
+            "--headless",
+            "--convert-to",
+            "docx",
+            "--outdir",
+            str(output_dir),
+            str(input_path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0 or not output_path.exists():
         detail = (completed.stderr or completed.stdout or "no LibreOffice output").strip()
         raise DocumentConversionError(f"DOC to DOCX conversion failed: {detail}")

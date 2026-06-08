@@ -13,10 +13,14 @@ class LocalFileStorage:
         self.root = root
         self.files_dir = self.root / "files"
         self.outputs_dir = self.root / "outputs"
+        self.reports_dir = self.root / "reports"
+        self.manifests_dir = self.root / "manifests"
 
     def ensure_ready(self) -> None:
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
 
     def store_bytes(self, filename: str, content: bytes) -> tuple[str, Path, str, int]:
         self.ensure_ready()

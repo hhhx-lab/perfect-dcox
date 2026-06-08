@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 
 from app.models import FileRecord
 from app.storage.local import LocalFileStorage
@@ -42,5 +43,21 @@ def build_files_router(
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
         return record
+
+    @router.get("/{file_id}/download")
+    def download_file(file_id: str) -> FileResponse:
+        record = repository.get_file(file_id)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
+
+        stored_path = Path(record.storage_path)
+        if not stored_path.exists() or not stored_path.is_file():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File content not found.")
+
+        return FileResponse(
+            stored_path,
+            media_type=record.mime_type,
+            filename=record.filename,
+        )
 
     return router

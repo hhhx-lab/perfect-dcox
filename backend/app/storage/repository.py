@@ -5,7 +5,16 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from app.models import FileRecord, FixLoopRecord, JobRecord, ProfileExtractionRecord, QualityReport, utc_now
+from app.models import (
+    BatchFormatRun,
+    FileRecord,
+    FixLoopRecord,
+    JobRecord,
+    ProfileExtractionRecord,
+    QualityReport,
+    RequirementSession,
+    utc_now,
+)
 from app.profiles.models import FormatProfile, ProfileSummary
 
 
@@ -25,6 +34,8 @@ class JsonMetadataRepository:
             "profiles": {},
             "profile_versions": {},
             "profile_extractions": {},
+            "requirement_sessions": {},
+            "batch_format_runs": {},
             "quality_reports": {},
             "quality_fix_loops": {},
         }
@@ -39,6 +50,8 @@ class JsonMetadataRepository:
             "profiles": data.get("profiles", {}),
             "profile_versions": data.get("profile_versions", {}),
             "profile_extractions": data.get("profile_extractions", {}),
+            "requirement_sessions": data.get("requirement_sessions", {}),
+            "batch_format_runs": data.get("batch_format_runs", {}),
             "quality_reports": data.get("quality_reports", {}),
             "quality_fix_loops": data.get("quality_fix_loops", {}),
         }
@@ -89,6 +102,30 @@ class JsonMetadataRepository:
             self._save(data)
         return record
 
+    def add_batch_format_run(self, record: BatchFormatRun) -> BatchFormatRun:
+        with self._lock:
+            data = self._load()
+            data["batch_format_runs"][record.batch_id] = record.model_dump(mode="json")
+            self._save(data)
+        return record
+
+    def get_batch_format_run(self, batch_id: str) -> BatchFormatRun | None:
+        data = self._load()
+        raw = data["batch_format_runs"].get(batch_id)
+        return BatchFormatRun.model_validate(raw) if raw else None
+
+    def list_batch_format_runs(self) -> list[BatchFormatRun]:
+        data = self._load()
+        return [BatchFormatRun.model_validate(raw) for raw in data["batch_format_runs"].values()]
+
+    def update_batch_format_run(self, record: BatchFormatRun) -> BatchFormatRun:
+        record.updated_at = utc_now()
+        with self._lock:
+            data = self._load()
+            data["batch_format_runs"][record.batch_id] = record.model_dump(mode="json")
+            self._save(data)
+        return record
+
     def add_profile_extraction(self, record: ProfileExtractionRecord) -> ProfileExtractionRecord:
         with self._lock:
             data = self._load()
@@ -110,6 +147,30 @@ class JsonMetadataRepository:
         with self._lock:
             data = self._load()
             data["profile_extractions"][record.extraction_id] = record.model_dump(mode="json")
+            self._save(data)
+        return record
+
+    def add_requirement_session(self, record: RequirementSession) -> RequirementSession:
+        with self._lock:
+            data = self._load()
+            data["requirement_sessions"][record.session_id] = record.model_dump(mode="json")
+            self._save(data)
+        return record
+
+    def get_requirement_session(self, session_id: str) -> RequirementSession | None:
+        data = self._load()
+        raw = data["requirement_sessions"].get(session_id)
+        return RequirementSession.model_validate(raw) if raw else None
+
+    def list_requirement_sessions(self) -> list[RequirementSession]:
+        data = self._load()
+        return [RequirementSession.model_validate(raw) for raw in data["requirement_sessions"].values()]
+
+    def update_requirement_session(self, record: RequirementSession) -> RequirementSession:
+        record.updated_at = utc_now()
+        with self._lock:
+            data = self._load()
+            data["requirement_sessions"][record.session_id] = record.model_dump(mode="json")
             self._save(data)
         return record
 
@@ -173,7 +234,7 @@ class JsonMetadataRepository:
     def get_profile_version(self, profile_id: str, version: str) -> FormatProfile | None:
         data = self._load()
         raw = data["profile_versions"].get(profile_id, {}).get(version)
-        return FormatProfile.model_validate(raw["profile"]) if raw else None
+        return FormatProfile.model_validate(_profile_with_defaults(raw["profile"])) if raw else None
 
     def save_profile_version(self, profile: FormatProfile) -> FormatProfile:
         with self._lock:
@@ -211,3 +272,22 @@ class JsonMetadataRepository:
             data["profiles"][profile_id] = raw
             self._save(data)
         return ProfileSummary.model_validate(raw)
+
+
+def _profile_with_defaults(raw_profile: dict[str, Any]) -> dict[str, Any]:
+    profile = dict(raw_profile)
+    if "header_footer" not in profile:
+        body_font = profile.get("body", {}).get("font") or {
+            "chinese": "SimSun",
+            "latin": "Times New Roman",
+            "size_pt": 10.5,
+            "weight": "normal",
+        }
+        profile["header_footer"] = {
+            "header_text": None,
+            "header_alignment": "center",
+            "footer_page_number": True,
+            "footer_alignment": "center",
+            "font": body_font,
+        }
+    return profile

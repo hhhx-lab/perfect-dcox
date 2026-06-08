@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
@@ -45,6 +45,12 @@ class TextFont(StrictModel):
     latin: str = Field(min_length=1)
     size_pt: float = Field(gt=0, le=72)
     weight: FontWeight = "normal"
+    color: str = Field(default="000000", pattern=r"^[0-9A-Fa-f]{6}$")
+
+    @field_validator("color", mode="before")
+    @classmethod
+    def normalize_color(cls, value: str) -> str:
+        return str(value).strip().lstrip("#").upper()
 
 
 class BodySettings(StrictModel):
@@ -100,6 +106,14 @@ class ReferenceSettings(StrictModel):
     hanging_indent_chars: float = Field(ge=0, le=10)
 
 
+class HeaderFooterSettings(StrictModel):
+    header_text: str | None = None
+    header_alignment: TextAlignment = "center"
+    footer_page_number: bool = True
+    footer_alignment: TextAlignment = "center"
+    font: TextFont
+
+
 class QualitySettings(StrictModel):
     check_margins: bool = True
     check_fonts: bool = True
@@ -125,6 +139,7 @@ class FormatProfile(StrictModel):
     figure: CaptionContainer
     equations: EquationSettings
     references: ReferenceSettings
+    header_footer: HeaderFooterSettings
     quality: QualitySettings
 
 

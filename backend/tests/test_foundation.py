@@ -9,7 +9,7 @@ from app.storage.repository import JsonMetadataRepository
 
 
 def build_client(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(Settings(FILE_STORAGE_ROOT=tmp_path)))
+    return TestClient(create_app(Settings(FILE_STORAGE_ROOT=tmp_path, LLM_API_KEY=None, LLM_MODEL=None, SOFFICE_BIN=None)))
 
 
 def test_health_does_not_require_optional_services(tmp_path: Path) -> None:
@@ -50,6 +50,14 @@ def test_upload_docx_and_retrieve_metadata(tmp_path: Path) -> None:
     assert loaded.status_code == 200
     assert loaded.json()["sha256"] == payload["sha256"]
 
+    downloaded = client.get(f"/api/files/{payload['file_id']}/download")
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"word bytes"
+    assert downloaded.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert "sample.docx" in downloaded.headers["content-disposition"]
+
 
 def test_upload_legacy_doc_and_reject_unsupported_file(tmp_path: Path) -> None:
     client = build_client(tmp_path)
@@ -60,6 +68,7 @@ def test_upload_legacy_doc_and_reject_unsupported_file(tmp_path: Path) -> None:
     assert legacy.status_code == 201
     assert rejected.status_code == 400
     assert client.get("/api/files/file_missing").status_code == 404
+    assert client.get("/api/files/file_missing/download").status_code == 404
 
 
 def test_create_job_and_retrieve_status(tmp_path: Path) -> None:

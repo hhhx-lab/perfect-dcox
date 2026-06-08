@@ -8,7 +8,12 @@ from app.models import FixAction, FixPlan, IssueExplanation, QualityIssue, Quali
 
 
 FIX_ACTION_BY_CHECK_KEY = {
+    "docx.page.setup": "reapply_profile_formatting",
     "docx.page.margins": "reapply_profile_formatting",
+    "docx.header_footer": "reapply_profile_formatting",
+    "docx.page_number": "reapply_profile_formatting",
+    "docx.fields.update_policy": "reapply_profile_formatting",
+    "docx.toc.fields": "reapply_profile_formatting",
     "docx.body.style": "apply_body_paragraph_style",
     "docx.heading.style": "apply_heading_style",
     "docx.table.borders": "apply_table_borders",

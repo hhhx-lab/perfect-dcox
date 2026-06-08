@@ -1,9 +1,13 @@
 import pytest
 from docx import Document
-from docx.shared import Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Cm, RGBColor
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app.core.config import Settings
 from app.documents.formatter import format_docx_with_profile
+from app.main import create_app
 from app.models import (
     FixAction,
     IssueExplanation,
@@ -19,7 +23,7 @@ from app.quality.fix_planning import FixPlanSafetyError, FixPlanService, validat
 from app.quality.service import QualityReportService
 from app.storage.repository import JsonMetadataRepository
 from app.storage.local import LocalFileStorage
-from tests.document_fixtures import create_minimal_thesis_docx
+from tests.document_fixtures import add_ooxml_features, create_minimal_thesis_docx
 
 
 def test_quality_report_models_serialize_status_groups_and_issue_metadata() -> None:
@@ -223,7 +227,7 @@ def test_quality_report_serializes_issues_by_status_without_hiding_unsupported()
     assert payload["summary"]["all_compliant"] is False
 
 
-def test_docx_quality_inspection_passes_profiled_output_and_marks_page_numbers_unsupported(tmp_path) -> None:
+def test_docx_quality_inspection_passes_profiled_output_and_page_numbers(tmp_path) -> None:
     profile = load_builtin_profiles()["ecnu_thesis"]
     source = create_minimal_thesis_docx(tmp_path / "source.docx")
     formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
@@ -232,13 +236,78 @@ def test_docx_quality_inspection_passes_profiled_output_and_marks_page_numbers_u
     by_key = {issue.check_key: issue for issue in issues}
 
     assert by_key["docx.page.margins"].status == "pass"
+    assert by_key["docx.page.setup"].status == "pass"
+    assert by_key["docx.header_footer"].status == "pass"
     assert by_key["docx.body.style"].status == "pass"
     assert by_key["docx.heading.style"].status == "pass"
     assert by_key["docx.table.borders"].status == "pass"
     assert by_key["docx.captions"].status == "pass"
     assert by_key["docx.raw_latex"].status == "pass"
-    assert by_key["docx.page_number"].status == "unsupported"
-    assert by_key["docx.page_number"].recommendation
+    assert by_key["docx.page_number"].status == "pass"
+    assert by_key["docx.ooxml.features"].status == "pass"
+    assert by_key["docx.fields.update_policy"].status == "pass"
+    assert by_key["docx.toc.fields"].status == "pass"
+    assert by_key["docx.notes"].status == "pass"
+    assert by_key["docx.visuals.caption_pairing"].status == "pass"
+
+
+def test_docx_quality_inspection_honors_profile_header_and_page_number_settings(tmp_path) -> None:
+    base_profile = load_builtin_profiles()["ecnu_thesis"]
+    profile = base_profile.model_copy(
+        update={
+            "page": base_profile.page.model_copy(update={"size": "Letter", "orientation": "landscape"}),
+            "header_footer": base_profile.header_footer.model_copy(
+                update={
+                    "header_text": "测试模板页眉",
+                    "footer_page_number": False,
+                    "header_alignment": "right",
+                }
+            ),
+        }
+    )
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+
+    issues = inspect_docx_quality(formatted, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["docx.page.setup"].status == "pass"
+    assert by_key["docx.header_footer"].status == "pass"
+    assert by_key["docx.page_number"].status == "pass"
+
+
+def test_docx_quality_inspection_detects_page_setup_and_header_footer_failures(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"].model_copy(
+        update={
+            "header_footer": load_builtin_profiles()["ecnu_thesis"].header_footer.model_copy(
+                update={"header_text": "必须出现的页眉", "footer_page_number": True}
+            )
+        }
+    )
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    document = Document(source)
+    document.sections[0].page_width = Cm(21.59)
+    document.sections[0].page_height = Cm(27.94)
+    broken = tmp_path / "broken.docx"
+    document.save(broken)
+
+    issues = inspect_docx_quality(broken, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["docx.page.setup"].status == "fail"
+    assert by_key["docx.header_footer"].status == "fail"
+    assert by_key["docx.header_footer"].fixable is True
+
+
+def test_docx_quality_inspection_fails_missing_page_numbers(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+
+    issues = inspect_docx_quality(source, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["docx.page_number"].status == "fail"
+    assert by_key["docx.page_number"].fixable is True
 
 
 def test_docx_quality_inspection_detects_margin_and_latex_failures(tmp_path) -> None:
@@ -257,6 +326,104 @@ def test_docx_quality_inspection_detects_margin_and_latex_failures(tmp_path) -> 
     assert by_key["docx.page.margins"].profile_rule_ref == "page.margins_cm"
     assert by_key["docx.raw_latex"].status == "fail"
     assert by_key["docx.raw_latex"].location == "paragraph[8]"
+
+
+def test_docx_quality_inspection_detects_body_font_color_mismatch(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    profile.body.font.color = "000000"
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    broken = Document(formatted)
+    broken.paragraphs[1].runs[0].font.color.rgb = RGBColor(255, 0, 0)
+    broken_path = tmp_path / "broken.docx"
+    broken.save(broken_path)
+
+    issues = inspect_docx_quality(broken_path, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["docx.body.style"].status == "warning"
+    assert "body run color expected 000000" in (by_key["docx.body.style"].description or "")
+
+
+def test_docx_caption_inspection_distinguishes_not_applicable_from_missing_captions(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    no_visuals = tmp_path / "no-visuals.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_paragraph("这是一份没有表格和图片的正文。")
+    document.save(no_visuals)
+
+    table_without_caption = tmp_path / "table-without-caption.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_paragraph("下表展示示例数据。")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "示例"
+    document.save(table_without_caption)
+
+    no_visuals_by_key = {issue.check_key: issue for issue in inspect_docx_quality(no_visuals, profile)}
+    table_by_key = {issue.check_key: issue for issue in inspect_docx_quality(table_without_caption, profile)}
+
+    assert no_visuals_by_key["docx.captions"].status == "pass"
+    assert table_by_key["docx.captions"].status == "warning"
+    assert table_by_key["docx.captions"].fixable is False
+
+
+def test_docx_quality_inspection_fails_closed_for_complex_ooxml_features(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    complex_docx = add_ooxml_features(
+        source,
+        toc_field=True,
+        footnote=True,
+        anchored_image=True,
+        numbering=True,
+        update_fields=False,
+    )
+
+    issues = inspect_docx_quality(complex_docx, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+    summary = QualitySummary.from_issues(issues)
+
+    assert by_key["docx.ooxml.features"].status == "pass"
+    assert by_key["docx.ooxml.features"].details["footnote_count"] == 1
+    assert by_key["docx.ooxml.features"].details["anchored_image_count"] == 1
+    assert by_key["docx.fields.update_policy"].status == "warning"
+    assert by_key["docx.toc.fields"].status == "warning"
+    assert by_key["docx.notes"].status == "unsupported"
+    assert by_key["docx.visuals.caption_pairing"].status == "unsupported"
+    assert by_key["docx.numbering"].status == "pass"
+    assert summary.all_compliant is False
+
+
+def test_docx_quality_inspection_detects_role_style_misclassification(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("1、引言")
+    document.add_paragraph("第一段正文已经正确应用正文样式。")
+    document.add_paragraph("第二段正文被错误套成参考文献悬挂缩进。")
+    document.add_paragraph("表 1 给出一个课程化比较。")
+    document.add_paragraph("表 1 RISC-V、Arm 与 x86 对比")
+    document.save(source)
+
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    broken = Document(formatted)
+    broken.paragraphs[0].style = broken.styles["Normal"]
+    broken.paragraphs[2].paragraph_format.left_indent = Cm(0.74)
+    broken.paragraphs[2].paragraph_format.first_line_indent = Cm(-0.74)
+    broken.paragraphs[1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    broken_path = tmp_path / "broken.docx"
+    broken.save(broken_path)
+
+    issues = inspect_docx_quality(broken_path, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    role_issue = by_key["docx.role_styles"]
+    assert role_issue.status == "warning"
+    assert role_issue.fixable is False
+    assert "paragraph[1] heading is not using a Word heading style" in role_issue.description
+    assert "paragraph[3] body has reference-style hanging indent" in role_issue.description
+    assert "paragraph[2] body is centered like a caption or equation" in role_issue.description
 
 
 def test_pdf_quality_inspection_passes_basic_deliverability(tmp_path) -> None:
@@ -342,9 +509,9 @@ def test_quality_report_service_generates_and_persists_status_summary(tmp_path) 
     assert report.summary.counts["pass"] >= 6
     assert report.summary.counts["warning"] >= 1
     assert report.summary.counts["fail"] >= 1
-    assert report.summary.counts["unsupported"] >= 1
+    assert report.summary.counts["unsupported"] == 0
     assert report.summary.all_compliant is False
-    assert report.issues_by_status["unsupported"][0].check_key == "docx.page_number"
+    assert any(issue.check_key == "pdf.text_extractability" for issue in report.issues_by_status["fail"])
 
 
 def test_fix_plan_service_explains_issues_and_uses_whitelisted_actions() -> None:
@@ -451,3 +618,59 @@ def test_fix_plan_service_is_deterministic_without_llm_configuration() -> None:
 
     assert [action.model_dump() for action in first.actions] == [action.model_dump() for action in second.actions]
     assert first.explanation == "Deterministic fallback fix plan generated from quality issue metadata."
+
+
+def test_fix_loop_execute_rewrites_docx_and_updates_lineage(tmp_path) -> None:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    storage = LocalFileStorage(tmp_path)
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    repository.save_profile_version(profile)
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    broken_doc = Document(source)
+    broken_doc.sections[0].top_margin = Cm(1.0)
+    broken_path = tmp_path / "broken-output.docx"
+    broken_doc.save(broken_path)
+    broken_record = storage.store_generated_file(
+        broken_path,
+        filename="broken-output.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    repository.add_file(broken_record)
+    report = QualityReportService(repository).create_report(
+        profile_id="ecnu_thesis",
+        profile_version="1.0.0",
+        output_file_ids=[broken_record.file_id],
+        job_id="job_original",
+    )
+    assert next(issue for issue in report.issues if issue.check_key == "docx.page.margins").status == "fail"
+    client = TestClient(create_app(Settings(FILE_STORAGE_ROOT=tmp_path, SOFFICE_BIN=None)))
+    plan_response = client.post(f"/api/quality-reports/{report.report_id}/fix-plan")
+    assert plan_response.status_code == 201
+    selected_issue_id = next(
+        action["target_issue_ids"][0]
+        for action in plan_response.json()["actions"]
+        if action["action"] == "reapply_profile_formatting"
+    )
+    loop_response = client.post(
+        f"/api/quality-reports/{report.report_id}/fix-loops",
+        json={"fix_plan_id": plan_response.json()["fix_plan_id"], "selected_issue_ids": [selected_issue_id]},
+    )
+    assert loop_response.status_code == 201
+
+    executed = client.post(
+        f"/api/quality-reports/{report.report_id}/fix-loops/{loop_response.json()['fix_loop_id']}/execute"
+    )
+
+    assert executed.status_code == 200
+    loop = executed.json()
+    assert loop["status"] == "completed"
+    assert loop["new_job_id"].startswith("job_fix_")
+    assert len(loop["new_output_file_ids"]) == 1
+    assert loop["updated_report_id"].startswith("qr_")
+    updated_report = repository.get_quality_report(loop["updated_report_id"])
+    assert updated_report is not None
+    assert updated_report.job_id == loop["new_job_id"]
+    assert next(issue for issue in updated_report.issues if issue.check_key == "docx.page.margins").status == "pass"
+    fixed_file = repository.get_file(loop["new_output_file_ids"][0])
+    assert fixed_file is not None
+    assert fixed_file.filename.endswith("-fixed.docx")

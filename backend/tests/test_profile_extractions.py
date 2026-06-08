@@ -247,7 +247,7 @@ def test_extract_rule_source_text_from_doc_uses_conversion(tmp_path, monkeypatch
 
 
 def test_configured_llm_provider_requires_env_configuration(tmp_path) -> None:
-    provider = ConfiguredLLMRuleExtractionProvider(Settings(FILE_STORAGE_ROOT=tmp_path))
+    provider = ConfiguredLLMRuleExtractionProvider(Settings(FILE_STORAGE_ROOT=tmp_path, LLM_API_KEY=None, LLM_MODEL=None))
 
     with pytest.raises(ExtractionSourceError, match="LLM_API_KEY and LLM_MODEL"):
         provider.extract("A4, 小四宋体", {"source_type": "natural_language"})

@@ -33,7 +33,12 @@ def process_placeholder_job(
             record.current_step = "Formatting DOCX with selected profile"
             repository.update_job(record)
             service = DocumentFormattingService(repository, storage, soffice_bin)
-            outputs = service.format_job(record.input_file_id, record.profile_id, record.profile_version)
+            outputs = service.format_job(
+                record.input_file_id,
+                record.profile_id,
+                record.profile_version,
+                include_pdf=bool(soffice_bin),
+            )
         except DocumentFormattingError as exc:
             record.status = "failed"
             record.progress = 100

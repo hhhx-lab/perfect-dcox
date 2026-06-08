@@ -23,6 +23,7 @@ body:
     latin: Times New Roman
     size_pt: 12
     weight: normal
+    color: '000000'
   first_line_indent_chars: 2
   line_spacing: 1.5
   alignment: justified
@@ -33,6 +34,7 @@ headings:
       latin: Times New Roman
       size_pt: 15
       weight: bold
+      color: '000000'
     alignment: center
     numbering: none
   - level: 2
@@ -41,6 +43,7 @@ headings:
       latin: Times New Roman
       size_pt: 12
       weight: bold
+      color: '000000'
     alignment: left
     numbering: decimal
 abstract:
@@ -52,11 +55,13 @@ abstract:
     latin: Times New Roman
     size_pt: 15
     weight: bold
+    color: '000000'
   body_font:
     chinese: SimSun
     latin: Times New Roman
     size_pt: 10.5
     weight: normal
+    color: '000000'
 table:
   caption:
     position: above
@@ -66,6 +71,7 @@ table:
       latin: Times New Roman
       size_pt: 10.5
       weight: normal
+      color: '000000'
 figure:
   caption:
     position: below
@@ -75,6 +81,7 @@ figure:
       latin: Times New Roman
       size_pt: 10.5
       weight: normal
+      color: '000000'
 equations:
   alignment: center
   numbering: right
@@ -86,7 +93,19 @@ references:
     latin: Times New Roman
     size_pt: 10.5
     weight: normal
+    color: '000000'
   hanging_indent_chars: 2
+header_footer:
+  header_text: null
+  header_alignment: center
+  footer_page_number: true
+  footer_alignment: center
+  font:
+    chinese: SimSun
+    latin: Times New Roman
+    size_pt: 10.5
+    weight: normal
+    color: '000000'
 quality:
   check_margins: true
   check_fonts: true

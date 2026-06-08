@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from docx import Document
+from docx.shared import Cm
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
@@ -30,6 +32,25 @@ def add_formatted_docx_output(tmp_path: Path) -> str:
     return record.file_id
 
 
+def add_broken_docx_output(tmp_path: Path) -> str:
+    repository = JsonMetadataRepository(tmp_path / "metadata.json")
+    storage = LocalFileStorage(tmp_path)
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = create_minimal_thesis_docx(tmp_path / "broken-source.docx")
+    formatted = format_docx_with_profile(source, tmp_path / "broken-formatted.docx", profile)
+    document = Document(formatted)
+    document.sections[0].top_margin = Cm(1.0)
+    broken = tmp_path / "broken-output.docx"
+    document.save(broken)
+    record = storage.store_generated_file(
+        broken,
+        filename="broken-output.docx",
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    repository.add_file(record)
+    return record.file_id
+
+
 def test_create_and_get_quality_report_for_formatted_output(tmp_path: Path) -> None:
     client = build_client(tmp_path)
     file_id = add_formatted_docx_output(tmp_path)
@@ -49,9 +70,9 @@ def test_create_and_get_quality_report_for_formatted_output(tmp_path: Path) -> N
     assert payload["report_id"].startswith("qr_")
     assert payload["job_id"] == "job_quality"
     assert payload["summary"]["counts"]["pass"] >= 6
-    assert payload["summary"]["counts"]["unsupported"] >= 1
-    assert payload["summary"]["all_compliant"] is False
-    assert payload["issues_by_status"]["unsupported"][0]["check_key"] == "docx.page_number"
+    assert payload["summary"]["counts"]["unsupported"] == 0
+    assert payload["summary"]["all_compliant"] is True
+    assert payload["issues_by_status"]["pass"]
 
     loaded = client.get(f"/api/quality-reports/{payload['report_id']}")
     assert loaded.status_code == 200
@@ -84,7 +105,7 @@ def test_create_quality_report_rejects_missing_output_or_profile(tmp_path: Path)
 
 def test_create_fix_plan_and_confirm_fix_loop_requires_user_confirmation(tmp_path: Path) -> None:
     client = build_client(tmp_path)
-    file_id = add_formatted_docx_output(tmp_path)
+    file_id = add_broken_docx_output(tmp_path)
     report = client.post(
         "/api/quality-reports",
         json={
@@ -102,13 +123,13 @@ def test_create_fix_plan_and_confirm_fix_loop_requires_user_confirmation(tmp_pat
     assert plan["fix_plan_id"].startswith("fp_")
     assert plan["report_id"] == report["report_id"]
     assert plan["explanations"]
-    assert plan["manual_review_issue_ids"]
+    assert plan["actions"]
 
     confirm_response = client.post(
         f"/api/quality-reports/{report['report_id']}/fix-loops",
         json={
             "fix_plan_id": plan["fix_plan_id"],
-            "selected_issue_ids": plan["manual_review_issue_ids"][:1],
+            "selected_issue_ids": plan["actions"][0]["target_issue_ids"],
         },
     )
 
@@ -125,7 +146,7 @@ def test_create_fix_plan_and_confirm_fix_loop_requires_user_confirmation(tmp_pat
     persisted = JsonMetadataRepository(tmp_path / "metadata.json").get_quality_fix_loop(loop["fix_loop_id"])
     assert persisted is not None
     assert persisted.original_report_id == report["report_id"]
-    assert persisted.selected_issue_ids == plan["manual_review_issue_ids"][:1]
+    assert persisted.selected_issue_ids == plan["actions"][0]["target_issue_ids"]
 
 
 def test_confirm_fix_loop_rejects_missing_report_or_unknown_issue(tmp_path: Path) -> None:

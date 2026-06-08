@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
     llm_api_key: str | None = Field(default=None, alias="LLM_API_KEY")
     llm_model: str | None = Field(default=None, alias="LLM_MODEL")
+    llm_base_url: str | None = Field(default=None, alias="LLM_BASE_URL")
+    llm_timeout_seconds: int = Field(default=120, ge=1, le=600, alias="LLM_TIMEOUT_SECONDS")
     soffice_bin: str | None = Field(default=None, alias="SOFFICE_BIN")
 
     @property

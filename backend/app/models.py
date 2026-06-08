@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -20,7 +22,15 @@ class FileRecord(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
-JobStatus = Literal["queued", "running", "completed", "failed"]
+JobStatus = Literal[
+    "queued",
+    "running",
+    "completed",
+    "quality_failed",
+    "manual_review_required",
+    "export_failed",
+    "failed",
+]
 
 
 class JobRecord(BaseModel):
@@ -38,8 +48,56 @@ class JobRecord(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+BatchStatus = Literal[
+    "queued",
+    "running",
+    "partially_completed",
+    "completed",
+    "quality_failed",
+    "manual_review_required",
+    "export_failed",
+    "failed",
+]
+
+
+class DeliveryManifestItem(BaseModel):
+    input_file_id: str
+    job_id: str
+    final_docx_file_id: str | None = None
+    final_pdf_file_id: str | None = None
+    quality_report_id: str | None = None
+    fix_loop_ids: list[str] = Field(default_factory=list)
+    download_urls: dict[str, str] = Field(default_factory=dict)
+    delivery_status: Literal["completed", "manual_review_required", "failed"] = "completed"
+
+
+class BatchFormatRun(BaseModel):
+    batch_id: str
+    profile_id: str
+    profile_version: str
+    input_file_ids: list[str] = Field(min_length=1)
+    job_ids: list[str] = Field(default_factory=list)
+    status: BatchStatus = "queued"
+    delivery_manifest_id: str | None = None
+    manifest_download_url: str | None = None
+    items: list[DeliveryManifestItem] = Field(default_factory=list)
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 ExtractionStatus = Literal["queued", "running", "completed", "failed", "needs_review"]
 ExtractionSourceType = Literal["document", "natural_language"]
+RequirementSessionSourceType = Literal["conversation", "document"]
+RequirementSessionStatus = Literal[
+    "collecting",
+    "needs_user_answer",
+    "ready_for_confirmation",
+    "confirmed",
+    "failed",
+]
+RequirementMessageRole = Literal["user", "agent", "system"]
+RequirementRuleSource = Literal["conversation", "document", "system_default", "user_confirmed"]
 
 
 class ExtractionEvidence(BaseModel):
@@ -54,6 +112,47 @@ class UncertainItem(BaseModel):
     field_path: str
     message: str
     suggestion: str
+
+
+class RequirementSessionMessage(BaseModel):
+    role: RequirementMessageRole
+    content: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class RequirementRuleItem(BaseModel):
+    field_path: str
+    label: str
+    value: str
+    source: RequirementRuleSource
+    confidence: float = Field(ge=0, le=1)
+    evidence: list[str] = Field(default_factory=list)
+    needs_confirmation: bool = False
+    supported: bool = True
+
+
+class RequirementSummary(BaseModel):
+    items: list[RequirementRuleItem] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    unsupported_or_uncertain_rules: list[UncertainItem] = Field(default_factory=list)
+
+
+class RequirementSession(BaseModel):
+    session_id: str
+    source_type: RequirementSessionSourceType
+    status: RequirementSessionStatus = "collecting"
+    file_id: str | None = None
+    natural_language: str | None = None
+    messages: list[RequirementSessionMessage] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    requirement_summary: RequirementSummary | None = None
+    profile_draft: FormatProfile | None = None
+    evidence: list[ExtractionEvidence] = Field(default_factory=list)
+    uncertain_items: list[UncertainItem] = Field(default_factory=list)
+    confirmed_profile_id: str | None = None
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class ProfileExtractionRecord(BaseModel):
