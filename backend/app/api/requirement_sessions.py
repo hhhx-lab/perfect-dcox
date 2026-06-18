@@ -5,17 +5,37 @@ from pydantic import BaseModel, Field
 
 from app.agents.extraction import ExtractionSourceError
 from app.agents.requirements import RequirementSessionService
-from app.models import RequirementSession, RequirementSessionSourceType
+from app.models import RequirementAttachmentSourceKind, RequirementSession, RequirementSessionAttachment, RequirementSessionSourceType
+from app.profiles.models import FormatProfile
+
+
+class RequirementAttachmentInput(BaseModel):
+    file_id: str | None = None
+    source_kind: RequirementAttachmentSourceKind
+    filename: str | None = None
 
 
 class CreateRequirementSessionRequest(BaseModel):
     source_type: RequirementSessionSourceType
     natural_language: str | None = None
     file_id: str | None = None
+    attachments: list[RequirementAttachmentInput] = Field(default_factory=list)
+    current_profile: FormatProfile | None = None
+    locked_fields: list[str] = Field(default_factory=list)
 
 
 class AddRequirementMessageRequest(BaseModel):
     content: str = Field(min_length=1)
+    current_profile: FormatProfile | None = None
+    locked_fields: list[str] = Field(default_factory=list)
+
+
+class AddRequirementAttachmentRequest(BaseModel):
+    file_id: str
+    source_kind: RequirementAttachmentSourceKind
+    filename: str | None = None
+    current_profile: FormatProfile | None = None
+    locked_fields: list[str] = Field(default_factory=list)
 
 
 class ConfirmRequirementSessionRequest(BaseModel):
@@ -34,6 +54,9 @@ def build_requirement_sessions_router(service: RequirementSessionService) -> API
                 payload.source_type,
                 natural_language=payload.natural_language,
                 file_id=payload.file_id,
+                attachments=[RequirementSessionAttachment(**item.model_dump()) for item in payload.attachments],
+                current_profile=payload.current_profile,
+                locked_fields=payload.locked_fields,
             )
         except ExtractionSourceError as error:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
@@ -48,7 +71,28 @@ def build_requirement_sessions_router(service: RequirementSessionService) -> API
     @router.post("/{session_id}/messages", response_model=RequirementSession)
     def add_requirement_message(session_id: str, payload: AddRequirementMessageRequest) -> RequirementSession:
         try:
-            return service.add_message(session_id, payload.content)
+            return service.add_message(
+                session_id,
+                payload.content,
+                current_profile=payload.current_profile,
+                locked_fields=payload.locked_fields,
+            )
+        except ExtractionSourceError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+    @router.post("/{session_id}/attachments", response_model=RequirementSession)
+    def add_requirement_attachment(session_id: str, payload: AddRequirementAttachmentRequest) -> RequirementSession:
+        try:
+            return service.add_attachment(
+                session_id,
+                RequirementSessionAttachment(
+                    file_id=payload.file_id,
+                    source_kind=payload.source_kind,
+                    filename=payload.filename,
+                ),
+                current_profile=payload.current_profile,
+                locked_fields=payload.locked_fields,
+            )
         except ExtractionSourceError as error:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 

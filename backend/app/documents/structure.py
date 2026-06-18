@@ -23,6 +23,8 @@ class ParagraphRole(str, Enum):
     REFERENCE_HEADING = "reference_heading"
     REFERENCE_ITEM = "reference_item"
     ACKNOWLEDGEMENT_HEADING = "acknowledgement_heading"
+    APPENDIX_HEADING = "appendix_heading"
+    APPENDIX_BODY = "appendix_body"
     EMPTY = "empty"
 
 
@@ -56,15 +58,25 @@ def classify_document(document: DocxDocument) -> DocumentStructure:
     first_nonempty = next((index for index, text in enumerate(texts) if text), None)
 
     classifications: list[ParagraphClassification] = []
+    inside_appendix = False
     for index, (text, style_name) in enumerate(zip(texts, style_names)):
         if not text:
             classifications.append(ParagraphClassification(ParagraphRole.EMPTY))
-        elif first_nonempty == index and style_name.lower().startswith("heading"):
-            classifications.append(ParagraphClassification(ParagraphRole.DOCUMENT_TITLE, 1))
         elif _paragraph_has_toc_field(document.paragraphs[index]):
             classifications.append(ParagraphClassification(ParagraphRole.TOC_TITLE))
         elif text in {"目录", "Contents"}:
             classifications.append(ParagraphClassification(ParagraphRole.TOC_TITLE))
+        elif first_nonempty == index and style_name.lower().startswith("heading"):
+            if _looks_like_document_title(text):
+                classifications.append(ParagraphClassification(ParagraphRole.DOCUMENT_TITLE, 1))
+            else:
+                classifications.append(ParagraphClassification(ParagraphRole.HEADING, _heading_level(text, style_name) or 1))
+        elif _is_appendix_heading(text):
+            inside_appendix = True
+            classifications.append(ParagraphClassification(ParagraphRole.APPENDIX_HEADING, 2))
+        elif inside_appendix and _is_appendix_terminator(text):
+            inside_appendix = False
+            classifications.append(ParagraphClassification(ParagraphRole.HEADING, _heading_level(text, style_name) or 2))
         elif index in toc_indices:
             classifications.append(ParagraphClassification(ParagraphRole.TOC_ITEM))
         elif index == reference_heading:
@@ -87,6 +99,8 @@ def classify_document(document: DocxDocument) -> DocumentStructure:
             classifications.append(ParagraphClassification(ParagraphRole.EQUATION))
         elif (heading_level := _heading_level(text, style_name)) is not None:
             classifications.append(ParagraphClassification(ParagraphRole.HEADING, heading_level))
+        elif inside_appendix:
+            classifications.append(ParagraphClassification(ParagraphRole.APPENDIX_BODY))
         elif first_nonempty is not None and index < first_nonempty + 7 and "：" in text:
             classifications.append(ParagraphClassification(ParagraphRole.COVER_OR_METADATA))
         else:
@@ -185,16 +199,55 @@ def _heading_level(text: str, style_name: str) -> int | None:
     return None
 
 
-def _is_table_caption(text: str) -> bool:
-    if re.search(r"(如下|所示|见|列出|显示|说明)", text):
+def _is_appendix_heading(text: str) -> bool:
+    return bool(re.match(r"^\s*(附录(?:\s*[A-ZＡ-Ｚ一二三四五六七八九十0-9]+)?|Appendix\b)", text.strip(), re.IGNORECASE))
+
+
+def _is_appendix_terminator(text: str) -> bool:
+    return text.strip() in {"参考文献", "References", "致谢", "Acknowledgements", "Acknowledgments"}
+
+
+def _looks_like_document_title(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
         return False
-    return bool(re.match(r"^(表\s*\d+|Table\s+\d+)[\s：:、.-]+\S+", text, re.IGNORECASE))
+    if _heading_level(stripped, "") is not None:
+        return False
+    if len(stripped) <= 8:
+        return False
+    if stripped.lower() in {
+        "abstract",
+        "acknowledgements",
+        "acknowledgments",
+        "references",
+        "introduction",
+        "preface",
+    }:
+        return False
+    return True
+
+
+def _is_table_caption(text: str) -> bool:
+    if re.search(r"(给出|如下|所示|见|列出|显示|说明|展示|概括)", text):
+        return False
+    return _caption_number_present(text, prefixes=("表", "Table"))
 
 
 def _is_figure_caption(text: str) -> bool:
-    if re.search(r"(给出|如下|所示|见|列出|显示|说明)", text):
+    if re.search(r"(给出|如下|所示|见|列出|显示|说明|展示|概括)", text):
         return False
-    return bool(re.match(r"^(图\s*\d+|Figure\s+\d+)[\s：:、.-]+\S+", text, re.IGNORECASE))
+    return _caption_number_present(text, prefixes=("图", "Figure"))
+
+
+def _caption_number_present(text: str, *, prefixes: tuple[str, str]) -> bool:
+    escaped = "|".join(re.escape(prefix) for prefix in prefixes)
+    return bool(
+        re.match(
+            rf"^(?:{escaped})\s*[\s：:、.\-/]*\s*\d+(?:[\s：:、.\-/]+\S+|$)",
+            text.strip(),
+            re.IGNORECASE,
+        )
+    )
 
 
 def _is_equation_paragraph(paragraph, text: str) -> bool:
@@ -208,4 +261,4 @@ def _is_equation_paragraph(paragraph, text: str) -> bool:
         return False
     if re.search(r"[\u4e00-\u9fff：；，。]", text):
         return False
-    return bool(re.match(r"^[A-Za-z0-9_{}\\^()+\-*/= .,]+$", text))
+    return bool(re.match(r"^[A-Za-z0-9_{}\\^()+\-*/= .,\t]+$", text))

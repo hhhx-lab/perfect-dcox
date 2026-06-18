@@ -69,6 +69,8 @@ def test_conversation_requirement_session_creates_profile_draft(tmp_path: Path) 
     assert payload["profile_draft"]["body"]["font"]["chinese"] == "SimSun"
     assert payload["profile_draft"]["body"]["font"]["latin"] == "Times New Roman"
     assert payload["profile_draft"]["body"]["line_spacing"] == 1.5
+    assert payload["profile_draft"]["llm_final_review"]["enabled"] is True
+    assert payload["profile_draft"]["llm_final_review"]["required"] is True
     assert payload["requirement_summary"]["items"]
     assert payload["messages"][-1]["role"] == "agent"
 
@@ -228,6 +230,95 @@ def test_requirement_session_accepts_follow_up_and_confirms_profile(tmp_path: Pa
     assert saved_profile.status_code == 200
     assert saved_profile.json()["name"] == "课程报告格式"
 
+    duplicate_source = client.post(
+        "/api/requirement-sessions",
+        json={"source_type": "conversation", "natural_language": "A4，正文宋体小四。"},
+    ).json()
+    duplicate_confirmed = client.post(
+        f"/api/requirement-sessions/{duplicate_source['session_id']}/confirm",
+        json={
+            "profile_name": "课程报告格式",
+            "profile_version": "1.0.0",
+            "profile_description": "同名同版本应自动保存为下一补丁版本。",
+        },
+    )
+
+    assert duplicate_confirmed.status_code == 200
+    duplicate_payload = duplicate_confirmed.json()
+    assert duplicate_payload["profile_draft"]["version"] == "1.0.1"
+    saved_duplicate = client.get(f"/api/profiles/{duplicate_payload['profile_draft']['id']}/versions/1.0.1")
+    assert saved_duplicate.status_code == 200
+
+
+def test_requirement_session_preserves_locked_profile_fields_on_follow_up(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    created = client.post(
+        "/api/requirement-sessions",
+        json={"source_type": "conversation", "natural_language": "A4，正文宋体小四，字色要红色。"},
+    ).json()
+    current_profile = created["profile_draft"]
+    current_profile["body"]["font"]["color"] = "000000"
+
+    updated = client.post(
+        f"/api/requirement-sessions/{created['session_id']}/messages",
+        json={
+            "content": "我又想到：正文和标题字色都要蓝色。",
+            "current_profile": current_profile,
+            "locked_fields": ["body.font.color"],
+        },
+    )
+
+    assert updated.status_code == 200
+    payload = updated.json()
+    assert payload["profile_draft"]["body"]["font"]["color"] == "000000"
+    assert "body.font.color" in payload["locked_fields"]
+    assert payload["profile_draft"]["capability_coverage"]
+    locked_coverage = [
+        item
+        for item in payload["profile_draft"]["capability_coverage"]
+        if item["field_path"] == "body.font.color"
+    ][0]
+    assert locked_coverage["locked_by_user"] is True
+    assert payload["profile_draft"]["manual_overrides"]
+
+
+def test_requirement_session_accepts_style_sample_docx_attachment(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    source = create_minimal_thesis_docx(tmp_path / "style-sample.docx")
+    uploaded = client.post(
+        "/api/files",
+        files={
+            "file": (
+                "style-sample.docx",
+                source.read_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert uploaded.status_code == 201
+
+    response = client.post(
+        "/api/requirement-sessions",
+        json={
+            "source_type": "conversation",
+            "natural_language": "请分析这个格式样本文档并沉淀为 Profile。",
+            "attachments": [
+                {
+                    "file_id": uploaded.json()["file_id"],
+                    "source_kind": "style_sample_docx",
+                    "filename": "style-sample.docx",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["attachments"][0]["source_kind"] == "style_sample_docx"
+    assert payload["profile_draft"]["source_documents"][0]["source_kind"] == "style_sample_docx"
+    assert any(item["source"] == "style_sample_docx" for item in payload["evidence"])
+    assert any(item["source"] == "style_sample_docx" for item in payload["profile_draft"]["rule_evidence"])
+
 
 def test_document_requirement_session_extracts_rule_docx_text(tmp_path: Path) -> None:
     client = build_client(tmp_path)
@@ -312,20 +403,159 @@ def test_document_requirement_session_extracts_ecnu_rule_document_details(tmp_pa
     assert "figure.caption.position" in fields
 
 
-def test_requirement_session_fails_when_provider_returns_schema_extra(tmp_path: Path) -> None:
-    class BadProvider:
+def test_requirement_session_records_unknown_provider_sections_as_unsupported(tmp_path: Path) -> None:
+    class ExtraSectionProvider:
         def extract_summary(self, source_text, source_meta, base_profile):
-            return {"items": [], "evidence": [], "uncertain_items": [], "profile_overrides": {"output": {"formats": ["Word"]}}}
+            return {
+                "items": [
+                    {
+                        "field_path": "page.size",
+                        "label": "纸张",
+                        "value": "A4",
+                        "source": "document",
+                        "confidence": 0.9,
+                        "evidence": ["A4"],
+                    }
+                ],
+                "evidence": [{"field_path": "page.size", "quote": "A4", "confidence": 0.9}],
+                "uncertain_items": [],
+                "profile_overrides": {
+                    "page": {"size": "A4", "orientation": "portrait"},
+                    "binding": {"position": "left"},
+                    "paper_printing": {"duplex": True},
+                },
+            }
 
     service = RequirementSessionService(
         JsonMetadataRepository(tmp_path / "metadata.json"),
         tmp_path,
         soffice_bin=None,
-        provider=BadProvider(),
+        provider=ExtraSectionProvider(),
     )
 
-    with pytest.raises(Exception, match="unsupported top-level field"):
-        service.create_session("conversation", natural_language="A4，正文宋体小四。")
+    session = service.create_session("conversation", natural_language="A4，正文宋体小四。")
+
+    assert session.profile_draft is not None
+    assert session.profile_draft.page.size == "A4"
+    assert {item.field_path for item in session.uncertain_items} >= {"binding", "paper_printing"}
+    assert {item.field_path for item in session.profile_draft.unsupported_rules} >= {"binding", "paper_printing"}
+
+
+def test_requirement_session_marks_unknown_provider_items_as_unsupported(tmp_path: Path) -> None:
+    class UnknownItemProvider:
+        def extract_summary(self, source_text, source_meta, base_profile):
+            return {
+                "items": [
+                    {
+                        "field_path": "title_cn.font.size_pt",
+                        "label": "中文题名字号",
+                        "value": "15",
+                        "source": "document",
+                        "confidence": 0.9,
+                        "evidence": ["中文题名用黑体小三"],
+                    },
+                    {
+                        "field_path": "page.size",
+                        "label": "纸张",
+                        "value": "A4",
+                        "source": "document",
+                        "confidence": 0.9,
+                        "evidence": ["A4"],
+                    },
+                ],
+                "evidence": [{"field_path": "page.size", "quote": "A4", "confidence": 0.9}],
+                "uncertain_items": [],
+                "profile_overrides": {"page": {"size": "A4", "orientation": "portrait"}},
+            }
+
+    service = RequirementSessionService(
+        JsonMetadataRepository(tmp_path / "metadata.json"),
+        tmp_path,
+        soffice_bin=None,
+        provider=UnknownItemProvider(),
+    )
+
+    session = service.create_session("conversation", natural_language="A4，中文题名用黑体小三。")
+
+    assert session.requirement_summary is not None
+    item_by_field = {item.field_path: item for item in session.requirement_summary.items}
+    assert item_by_field["title_cn.font.size_pt"].supported is False
+    assert item_by_field["page.size"].supported is True
+    assert session.profile_draft is not None
+    assert {item.field_path for item in session.profile_draft.unsupported_rules} >= {"title_cn.font.size_pt"}
+
+
+def test_requirement_session_ignores_provider_metadata_annotations(tmp_path: Path) -> None:
+    class AnnotationProvider:
+        def extract_summary(self, source_text, source_meta, base_profile):
+            return {
+                "items": [
+                    {
+                        "field_path": "page.size",
+                        "label": "纸张",
+                        "value": "A4",
+                        "source": "document",
+                        "confidence": 0.9,
+                        "evidence": ["A4"],
+                    }
+                ],
+                "evidence": [{"field_path": "page.size", "quote": "A4", "confidence": 0.9}],
+                "uncertain_items": [],
+                "profile_overrides": {
+                    "page": {"size": "A4", "orientation": "portrait"},
+                    "annotations": {"note": "provider-side explanation only"},
+                },
+            }
+
+    service = RequirementSessionService(
+        JsonMetadataRepository(tmp_path / "metadata.json"),
+        tmp_path,
+        soffice_bin=None,
+        provider=AnnotationProvider(),
+    )
+
+    session = service.create_session("conversation", natural_language="A4。")
+
+    assert session.profile_draft is not None
+    assert session.profile_draft.page.size == "A4"
+
+
+def test_requirement_session_normalizes_object_source_status_overrides(tmp_path: Path) -> None:
+    class ObjectEnumProvider:
+        def extract_summary(self, source_text, source_meta, base_profile):
+            return {
+                "items": [
+                    {
+                        "field_path": "page.size",
+                        "label": "纸张",
+                        "value": "A4",
+                        "source": "document",
+                        "confidence": 0.9,
+                        "evidence": ["A4"],
+                    }
+                ],
+                "evidence": [{"field_path": "page.size", "quote": "A4", "confidence": 0.9}],
+                "uncertain_items": [],
+                "profile_overrides": {
+                    "source": {"kind": "rule_document"},
+                    "status": {"state": "draft"},
+                    "page": {"size": "A4", "orientation": "portrait"},
+                },
+            }
+
+    service = RequirementSessionService(
+        JsonMetadataRepository(tmp_path / "metadata.json"),
+        tmp_path,
+        soffice_bin=None,
+        provider=ObjectEnumProvider(),
+    )
+
+    session = service.create_session("conversation", natural_language="A4。")
+
+    assert session.profile_draft is not None
+    assert session.profile_draft.source == "imported"
+    assert session.profile_draft.status == "draft"
+    assert session.profile_draft.page.size == "A4"
 
 
 def test_requirement_session_keeps_known_unsupported_sections_as_uncertain(tmp_path: Path) -> None:
@@ -368,7 +598,53 @@ def test_requirement_session_keeps_known_unsupported_sections_as_uncertain(tmp_p
 
     assert session.profile_draft is not None
     assert session.profile_draft.page.size == "A4"
-    assert {item.field_path for item in session.uncertain_items} >= {"appendix", "cover", "toc", "notes"}
+    assert session.profile_draft.appendix.title_font.size_pt == 12.0
+    assert session.profile_draft.notes.font.size_pt == 9.0
+    assert {item.field_path for item in session.uncertain_items} >= {"cover", "toc"}
+    assert "appendix" not in {item.field_path for item in session.uncertain_items}
+    assert "notes" not in {item.field_path for item in session.uncertain_items}
+    assert {item.field_path for item in session.profile_draft.unsupported_rules} >= {"cover", "toc"}
+    assert "appendix" not in {item.field_path for item in session.profile_draft.unsupported_rules}
+    assert "notes" not in {item.field_path for item in session.profile_draft.unsupported_rules}
+
+
+def test_requirement_session_does_not_mark_plain_uncertainty_as_unsupported_rule(tmp_path: Path) -> None:
+    class UnclearProvider:
+        def extract_summary(self, source_text, source_meta, base_profile):
+            return {
+                "items": [
+                    {
+                        "field_path": "page.size",
+                        "label": "纸张",
+                        "value": "A4",
+                        "source": "document",
+                        "confidence": 0.9,
+                        "evidence": ["A4"],
+                    }
+                ],
+                "evidence": [{"field_path": "page.size", "quote": "A4", "confidence": 0.9}],
+                "uncertain_items": [
+                    {
+                        "field_path": "caption_font",
+                        "message": "未明确图表题名字体。",
+                        "suggestion": "使用默认值或补充说明。",
+                    }
+                ],
+                "profile_overrides": {"page": {"size": "A4", "orientation": "portrait"}},
+            }
+
+    service = RequirementSessionService(
+        JsonMetadataRepository(tmp_path / "metadata.json"),
+        tmp_path,
+        soffice_bin=None,
+        provider=UnclearProvider(),
+    )
+
+    session = service.create_session("conversation", natural_language="A4。")
+
+    assert session.profile_draft is not None
+    assert "caption_font" in {item.field_path for item in session.uncertain_items}
+    assert session.profile_draft.unsupported_rules == []
 
 
 def test_requirement_session_fails_when_provider_call_fails(tmp_path: Path) -> None:
@@ -423,18 +699,20 @@ def test_requirement_session_normalizes_common_llm_payload_aliases(tmp_path: Pat
                         "alignment": "justified",
                     },
                     "headings": [
-                        {"level": 1, "font": {"chinese": "SimHei", "size_hao": "小三", "color": "000000"}, "alignment": "center"},
-                        {"level": 2, "font": {"chinese": "SimHei", "size_hao": "小四", "color": "000000"}},
+                        {"level": "document_title_cn", "font": {"chinese": "SimHei", "size_hao": "小三", "color": "000000"}, "alignment": "center"},
+                        {"level": "section_heading", "font": {"chinese": "SimHei", "size_hao": "小四", "color": "000000"}},
                     ],
                     "title": {"font": {"chinese": "SimHei", "size_hao": "小三", "color": "000000"}, "alignment": "center"},
                     "abstract": {
                         "body_font": {"chinese": "SimSun", "latin": "Times New Roman", "size_hao": "五号", "color": "000000"}
                     },
                     "table": {"style": "three_line_table", "caption": {"position": "above"}},
-                    "figure": {"caption": {"position": "below"}},
+                    "figure": {"caption": {"position": "below"}, "placement": "inline_at_corresponding_text"},
                     "equations": {"alignment": "center", "italic": True},
                     "references": {"style": "GB/T 7714", "order": "citation_order"},
                     "header_footer": {"footer_page_number": True, "footer_alignment": "center", "page_number_format": "arabic"},
+                    "document_grid": {"enabled": True, "type": "lines_and_chars"},
+                    "unit_rules": {"unit_spacing": "空格"},
                     "notes": {"font": {"chinese": "SimSun", "size_hao": "小五"}},
                 },
             }
@@ -457,11 +735,17 @@ def test_requirement_session_normalizes_common_llm_payload_aliases(tmp_path: Pat
 
     assert session.profile_draft is not None
     assert session.profile_draft.body.font.size_pt == 12
+    assert session.profile_draft.headings[0].level == 1
+    assert session.profile_draft.headings[1].level == 2
     assert session.profile_draft.headings[0].font.size_pt == 15
     assert session.profile_draft.headings[1].font.size_pt == 12
     assert session.profile_draft.table.caption.position == "above"
     assert session.profile_draft.figure.caption.position == "below"
+    assert session.profile_draft.figure.placement == "inline"
     assert session.profile_draft.equations.alignment == "center"
+    assert session.profile_draft.document_grid.type == "line_and_character"
+    assert session.profile_draft.unit_rules.unit_spacing == "space"
+    assert session.profile_draft.notes.font.size_pt == 9
     assert session.requirement_summary is not None
     assert {item.field_path for item in session.requirement_summary.items} >= {"page.size", "body.font.size_pt"}
     assert any(item.field_path == "default_font_color" for item in session.uncertain_items)

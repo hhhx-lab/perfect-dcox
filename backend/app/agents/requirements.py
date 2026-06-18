@@ -12,16 +12,26 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from app.agents.extraction import ExtractionSourceError, extract_rule_source_text
+from app.agents.style_sample_extractor import extract_style_sample_analysis
 from app.core.config import Settings
+from app.documents.rule_registry import build_capability_coverage, field_path_has_blocking_capability_gap
+from app.llm.openai_compat import parse_chat_completion_content
 from app.models import (
     ExtractionEvidence,
     RequirementRuleItem,
+    RequirementSessionAttachment,
     RequirementSession,
     RequirementSessionMessage,
     RequirementSummary,
     UncertainItem,
 )
-from app.profiles.models import FormatProfile
+from app.profiles.models import (
+    FormatProfile,
+    ProfileManualOverride,
+    ProfileRuleEvidence,
+    ProfileSourceDocument,
+    ProfileUnsupportedRule,
+)
 from app.profiles.seed import load_builtin_profiles
 from app.storage.repository import DuplicateProfileVersionError, JsonMetadataRepository
 
@@ -39,10 +49,16 @@ REQUIRED_FIELDS = [
     "outputs",
 ]
 UNSUPPORTED_OVERRIDE_FIELDS = {
-    "appendix": "附录",
     "cover": "封面",
     "toc": "目录",
-    "notes": "脚注/尾注",
+}
+IGNORED_PROVIDER_OVERRIDE_KEYS = {
+    "annotations",
+    "assumptions",
+    "comments",
+    "metadata",
+    "rationale",
+    "reasoning",
 }
 POINT_BY_CHINESE_SIZE = {
     "初号": 42.0,
@@ -114,6 +130,7 @@ class OpenAICompatibleRequirementProvider:
                 },
             ],
             "temperature": 0,
+            "stream": True,
             "response_format": {"type": "json_object"},
         }
         raw_request = request.Request(
@@ -127,13 +144,12 @@ class OpenAICompatibleRequirementProvider:
         )
         try:
             with request.urlopen(raw_request, timeout=self.settings.llm_timeout_seconds) as response:  # noqa: S310 - URL is configured by operator.
-                response_payload = json.loads(response.read().decode("utf-8"))
+                content = parse_chat_completion_content(response.read())
         except Exception as exc:  # noqa: BLE001 - surface provider diagnostics to the session.
             raise ExtractionSourceError(f"Live LLM requirement extraction failed: {exc}") from exc
         try:
-            content = response_payload["choices"][0]["message"]["content"]
             return json.loads(content)
-        except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        except json.JSONDecodeError as exc:
             raise ExtractionSourceError("Live LLM response did not contain valid structured JSON.") from exc
 
 
@@ -143,6 +159,13 @@ class RequirementDraft:
     profile: FormatProfile
     evidence: list[ExtractionEvidence]
     uncertain_items: list[UncertainItem]
+
+
+@dataclass(frozen=True)
+class _RequirementSourceContext:
+    text: str
+    evidence: list[ExtractionEvidence]
+    source_documents: list[ProfileSourceDocument]
 
 
 class RequirementSessionService:
@@ -163,28 +186,48 @@ class RequirementSessionService:
         source_type: str,
         natural_language: str | None = None,
         file_id: str | None = None,
+        attachments: list[RequirementSessionAttachment] | None = None,
+        current_profile: FormatProfile | None = None,
+        locked_fields: list[str] | None = None,
     ) -> RequirementSession:
         if source_type not in {"conversation", "document"}:
             raise ExtractionSourceError("source_type must be conversation or document.")
-        if source_type == "conversation" and not (natural_language or "").strip():
-            raise ExtractionSourceError("natural_language is required for conversation sessions.")
-        if source_type == "document" and not file_id:
-            raise ExtractionSourceError("file_id is required for document sessions.")
+        session_id = f"rs_{uuid4().hex}"
+        session_attachments = self._normalize_attachments(source_type, file_id, attachments)
+        if source_type == "conversation" and not (natural_language or "").strip() and not session_attachments:
+            raise ExtractionSourceError("natural_language or attachments are required for conversation sessions.")
+        if source_type == "document" and not session_attachments:
+            raise ExtractionSourceError("file_id or attachments are required for document sessions.")
 
-        source_text = self._source_text(source_type, natural_language, file_id, f"rs_{uuid4().hex}")
-        draft = self._build_draft(source_text, source_type, file_id=file_id)
+        context = self._source_context(
+            session_id,
+            natural_language=natural_language,
+            attachments=session_attachments,
+            messages=[],
+        )
+        draft = self._build_draft(
+            context.text,
+            source_type,
+            file_id=file_id,
+            base_profile=current_profile,
+            locked_fields=locked_fields or [],
+            extra_evidence=context.evidence,
+            source_documents=context.source_documents,
+        )
         messages = [
             RequirementSessionMessage(role="user", content=(natural_language or "已上传格式规则文档。").strip()),
             RequirementSessionMessage(role="agent", content=_agent_summary_message(draft)),
         ]
         status = "needs_user_answer" if draft.summary.missing_fields else "ready_for_confirmation"
         session = RequirementSession(
-            session_id=f"rs_{uuid4().hex}",
+            session_id=session_id,
             source_type=source_type,  # type: ignore[arg-type]
             status=status,
             file_id=file_id,
             natural_language=natural_language.strip() if natural_language else None,
+            attachments=session_attachments,
             messages=messages,
+            locked_fields=list(dict.fromkeys(locked_fields or [])),
             missing_fields=draft.summary.missing_fields,
             requirement_summary=draft.summary,
             profile_draft=draft.profile,
@@ -193,24 +236,66 @@ class RequirementSessionService:
         )
         return self.repository.add_requirement_session(session)
 
-    def add_message(self, session_id: str, content: str) -> RequirementSession:
+    def add_message(
+        self,
+        session_id: str,
+        content: str,
+        current_profile: FormatProfile | None = None,
+        locked_fields: list[str] | None = None,
+    ) -> RequirementSession:
         session = self._get_session(session_id)
         text = content.strip()
         if not text:
             raise ExtractionSourceError("Message content cannot be empty.")
         session.messages.append(RequirementSessionMessage(role="user", content=text))
-        merged_text = "\n".join([session.natural_language or "", text])
-        if session.source_type == "document" and session.file_id:
-            merged_text = "\n".join([self._document_text(session.file_id, session.session_id), text])
-        draft = self._build_draft(merged_text, session.source_type, file_id=session.file_id)
+        merged_locked_fields = list(dict.fromkeys([*session.locked_fields, *(locked_fields or [])]))
+        context = self._source_context(
+            session.session_id,
+            natural_language=session.natural_language,
+            attachments=session.attachments,
+            messages=session.messages,
+        )
+        draft = self._build_draft(
+            context.text,
+            session.source_type,
+            file_id=session.file_id,
+            base_profile=current_profile or session.profile_draft,
+            locked_fields=merged_locked_fields,
+            extra_evidence=context.evidence,
+            source_documents=context.source_documents,
+        )
         session.requirement_summary = draft.summary
         session.profile_draft = draft.profile
         session.evidence = draft.evidence
         session.uncertain_items = draft.uncertain_items
         session.missing_fields = draft.summary.missing_fields
+        session.locked_fields = merged_locked_fields
         session.status = "needs_user_answer" if session.missing_fields else "ready_for_confirmation"
         session.messages.append(RequirementSessionMessage(role="agent", content=_agent_summary_message(draft)))
         return self.repository.update_requirement_session(session)
+
+    def add_attachment(
+        self,
+        session_id: str,
+        attachment: RequirementSessionAttachment,
+        current_profile: FormatProfile | None = None,
+        locked_fields: list[str] | None = None,
+    ) -> RequirementSession:
+        session = self._get_session(session_id)
+        session.attachments.append(attachment)
+        session.messages.append(
+            RequirementSessionMessage(
+                role="user",
+                content=f"已上传{_attachment_kind_label(attachment.source_kind)}：{attachment.filename or attachment.file_id or '未命名文件'}。",
+            )
+        )
+        self.repository.update_requirement_session(session)
+        return self.add_message(
+            session_id,
+            f"请分析刚上传的{_attachment_kind_label(attachment.source_kind)}，并合并到当前 Profile JSON。",
+            current_profile=current_profile,
+            locked_fields=locked_fields,
+        )
 
     def confirm_session(
         self,
@@ -227,7 +312,7 @@ class RequirementSessionService:
         profile = session.profile_draft.model_copy(deep=True)
         profile.id = _slugify_profile_id(profile_name)
         profile.name = profile_name.strip()
-        profile.version = profile_version.strip()
+        profile.version = _next_available_profile_version(self.repository, profile.id, profile_version.strip())
         profile.description = profile_description or profile.description
         profile.status = "active"
         profile.source = "user"
@@ -249,34 +334,118 @@ class RequirementSessionService:
             raise ExtractionSourceError("Requirement session not found.")
         return session
 
-    def _source_text(self, source_type: str, natural_language: str | None, file_id: str | None, work_id: str) -> str:
-        if source_type == "conversation":
-            return (natural_language or "").strip()
-        if not file_id:
-            raise ExtractionSourceError("file_id is required for document sessions.")
-        return self._document_text(file_id, work_id)
-
     def _document_text(self, file_id: str, work_id: str) -> str:
         record = self.repository.get_file(file_id)
         if record is None:
             raise ExtractionSourceError(f"Rule source file not found: {file_id}")
         return extract_rule_source_text(record, self.storage_root / "work" / work_id, self.soffice_bin)
 
-    def _build_draft(self, source_text: str, source_type: str, file_id: str | None) -> RequirementDraft:
-        base = _base_profile()
+    def _build_draft(
+        self,
+        source_text: str,
+        source_type: str,
+        file_id: str | None,
+        base_profile: FormatProfile | None = None,
+        locked_fields: list[str] | None = None,
+        extra_evidence: list[ExtractionEvidence] | None = None,
+        source_documents: list[ProfileSourceDocument] | None = None,
+    ) -> RequirementDraft:
+        base = (base_profile or _base_profile()).model_copy(deep=True)
+        locked_snapshot = _snapshot_locked_fields(base, locked_fields or [])
         if self.provider is None:
             raise ExtractionSourceError("LLM requirement extraction is not configured; cannot analyze formatting rules.")
         payload = self.provider.extract_summary(
             source_text,
-            {"source_type": source_type, "file_id": file_id or ""},
+            {
+                "source_type": source_type,
+                "file_id": file_id or "",
+                "locked_fields": json.dumps(locked_fields or [], ensure_ascii=False),
+            },
             base,
         )
         draft = _draft_from_provider_payload(payload, base, source_type)
-        return _draft_with_deterministic_rules(
+        draft = _draft_with_deterministic_rules(
             source_text,
             draft,
             base,
             "document" if source_type == "document" else "conversation",
+            locked_fields=locked_fields or [],
+            extra_evidence=extra_evidence or [],
+            source_documents=source_documents or [],
+        )
+        _restore_locked_fields(draft.profile, locked_snapshot)
+        draft.profile.locked_fields = list(dict.fromkeys([*draft.profile.locked_fields, *(locked_fields or [])]))
+        return draft
+
+    def _normalize_attachments(
+        self,
+        source_type: str,
+        file_id: str | None,
+        attachments: list[RequirementSessionAttachment] | None,
+    ) -> list[RequirementSessionAttachment]:
+        normalized = list(attachments or [])
+        if file_id and not any(item.file_id == file_id for item in normalized):
+            normalized.append(RequirementSessionAttachment(file_id=file_id, source_kind="rule_document"))
+        if source_type == "conversation":
+            return normalized
+        return normalized
+
+    def _source_context(
+        self,
+        session_id: str,
+        *,
+        natural_language: str | None,
+        attachments: list[RequirementSessionAttachment],
+        messages: list[RequirementSessionMessage],
+    ) -> "_RequirementSourceContext":
+        parts: list[str] = []
+        evidence: list[ExtractionEvidence] = []
+        source_documents: list[ProfileSourceDocument] = []
+        if natural_language and natural_language.strip():
+            parts.append(f"NATURAL_LANGUAGE_INITIAL:\n{natural_language.strip()}")
+        for message in messages:
+            if message.role == "user" and message.content.strip():
+                parts.append(f"USER_MESSAGE:\n{message.content.strip()}")
+        for index, attachment in enumerate(attachments, start=1):
+            if attachment.source_kind == "natural_language":
+                continue
+            if not attachment.file_id:
+                raise ExtractionSourceError(f"Attachment {index} is missing file_id.")
+            record = self.repository.get_file(attachment.file_id)
+            if record is None:
+                raise ExtractionSourceError(f"Rule source file not found: {attachment.file_id}")
+            attachment.filename = attachment.filename or record.filename
+            source_documents.append(
+                ProfileSourceDocument(
+                    file_id=record.file_id,
+                    filename=record.filename,
+                    source_kind=attachment.source_kind,
+                    note=_attachment_kind_label(attachment.source_kind),
+                )
+            )
+            if attachment.source_kind == "style_sample_docx":
+                analysis = extract_style_sample_analysis(
+                    record,
+                    self.storage_root / "work" / session_id / f"style-sample-{index}",
+                    self.soffice_bin,
+                )
+                parts.append(f"STYLE_SAMPLE_DOCX_ATTACHMENT {record.filename}:\n{analysis.text}")
+                evidence.extend(analysis.evidence)
+            elif attachment.source_kind == "rule_document":
+                document_text = extract_rule_source_text(
+                    record,
+                    self.storage_root / "work" / session_id / f"rule-document-{index}",
+                    self.soffice_bin,
+                )
+                parts.append(f"RULE_DOCUMENT_ATTACHMENT {record.filename}:\n{document_text}")
+            else:
+                raise ExtractionSourceError(f"Unsupported attachment source_kind: {attachment.source_kind}")
+        if not parts:
+            raise ExtractionSourceError("Requirement source context is empty.")
+        return _RequirementSourceContext(
+            text="\n\n".join(parts),
+            evidence=evidence,
+            source_documents=source_documents,
         )
 
 
@@ -289,6 +458,7 @@ def _deterministic_draft(source_text: str, base: FormatProfile, source: str) -> 
     profile.id = "agent_profile_draft"
     profile.name = "Agent 拆解格式 Profile 草案"
     profile.version = "0.1.0"
+    profile.schema_version = "2.0.0"
     profile.status = "draft"
     profile.source = "imported"
     profile.description = "由 Agent 从格式需求中拆解生成；保存前请确认名称和版本。"
@@ -487,6 +657,7 @@ def _deterministic_draft(source_text: str, base: FormatProfile, source: str) -> 
         )
         for field in missing
     ]
+    _attach_profile_v2_metadata(profile, evidence, missing, uncertain)
     return RequirementDraft(
         summary=RequirementSummary(items=items, missing_fields=missing, unsupported_or_uncertain_rules=uncertain),
         profile=profile,
@@ -506,6 +677,7 @@ def _draft_from_provider_payload(payload: dict[str, Any], base: FormatProfile, s
         profile.id = "agent_profile_draft"
         profile.name = "Agent 拆解格式 Profile 草案"
         profile.version = "0.1.0"
+        profile.schema_version = "2.0.0"
         profile.status = "draft"
         profile.source = "imported"
         profile = FormatProfile.model_validate(profile.model_dump(mode="json"))
@@ -522,14 +694,40 @@ def _draft_from_provider_payload(payload: dict[str, Any], base: FormatProfile, s
         uncertain = [UncertainItem.model_validate(item) for item in payload.get("uncertain_items", [])]
     except ValidationError as exc:
         raise ExtractionSourceError(f"Requirement provider output failed schema validation: {exc}") from exc
+    unsupported_from_items = _unsupported_items_from_provider_items(items)
+    uncertain = [*uncertain, *unsupported_from_items]
+    items = [
+        item.model_copy(update={"supported": False})
+        if any(_field_covered_by_any(item.field_path, {unsupported.field_path}) for unsupported in unsupported_from_items)
+        else item
+        for item in items
+    ]
     covered = {item.field_path for item in items}
     missing = [field for field in REQUIRED_FIELDS if not _field_covered(field, covered)]
+    _attach_profile_v2_metadata(profile, evidence, missing, uncertain)
     return RequirementDraft(
         summary=RequirementSummary(items=items, missing_fields=missing, unsupported_or_uncertain_rules=uncertain),
         profile=profile,
         evidence=evidence,
         uncertain_items=uncertain,
     )
+
+
+def _unsupported_items_from_provider_items(items: list[RequirementRuleItem]) -> list[UncertainItem]:
+    unsupported: list[UncertainItem] = []
+    seen: set[str] = set()
+    for item in items:
+        if item.field_path in seen or not field_path_has_blocking_capability_gap(item.field_path):
+            continue
+        seen.add(item.field_path)
+        unsupported.append(
+            UncertainItem(
+                field_path=item.field_path,
+                message=f"LLM 识别到 {item.label} 规则，但当前 Profile/formatter/QC 尚不能自动执行该字段。",
+                suggestion="该规则已保留为 unsupported_rules；导出前需要扩展格式脚本和内部 QC，或由用户改写到已支持字段。",
+            )
+        )
+    return unsupported
 
 
 def _normalize_provider_payload(payload: dict[str, Any], base: FormatProfile, source_type: str) -> dict[str, Any]:
@@ -540,7 +738,7 @@ def _normalize_provider_payload(payload: dict[str, Any], base: FormatProfile, so
         _normalize_provider_evidence(item, source_type) for item in payload.get("evidence", []) if isinstance(item, dict)
     ]
     normalized["evidence"] = [item for item in normalized_evidence if item["field_path"]]
-    unsupported = _unsupported_uncertain_items(payload.get("profile_overrides") or {})
+    unsupported = _unsupported_uncertain_items(payload.get("profile_overrides") or {}, base)
     normalized["uncertain_items"] = [
         _normalize_uncertain_item(item)
         for item in [*(payload.get("uncertain_items") or []), *unsupported]
@@ -552,10 +750,12 @@ def _normalize_provider_payload(payload: dict[str, Any], base: FormatProfile, so
     return normalized
 
 
-def _unsupported_uncertain_items(overrides: Any) -> list[dict[str, str]]:
+def _unsupported_uncertain_items(overrides: Any, base: FormatProfile) -> list[dict[str, str]]:
     if not isinstance(overrides, dict):
         return []
     items: list[dict[str, str]] = []
+    known_top_level = set(base.model_dump(mode="json"))
+    allowed_aliases = {"title"}
     for field_path, label in UNSUPPORTED_OVERRIDE_FIELDS.items():
         if field_path not in overrides:
             continue
@@ -564,6 +764,14 @@ def _unsupported_uncertain_items(overrides: Any) -> list[dict[str, str]]:
                 "field_path": field_path,
                 "message": f"LLM 识别到{label}规则，但当前 Profile schema 还不能自动执行该类规则。",
                 "suggestion": f"导出后在质量报告中保留人工复核，或后续扩展 {field_path} schema。",
+            }
+        )
+    for field_path in sorted(set(overrides) - known_top_level - allowed_aliases - IGNORED_PROVIDER_OVERRIDE_KEYS):
+        items.append(
+            {
+                "field_path": field_path,
+                "message": f"LLM 识别到 {field_path} 规则，但当前 Profile schema 还不能自动执行该类规则。",
+                "suggestion": "该规则已保留为 unsupported_rules；导出前需要扩展 Profile/formatter/QC 能力或由用户改写到已支持字段。",
             }
         )
     return items
@@ -583,7 +791,7 @@ def _normalize_provider_item(item: dict[str, Any], source_type: str) -> dict[str
     value = item.get("value")
     label = str(item.get("label") or _field_label(field_path) or field_path or "格式规则")
     source = item.get("source")
-    if source not in {"conversation", "document", "system_default", "user_confirmed"}:
+    if source not in {"conversation", "document", "style_sample_docx", "rule_document", "system_default", "user_confirmed"}:
         source = "document" if source_type == "document" else "conversation"
     confidence = item.get("confidence")
     if confidence is None:
@@ -616,7 +824,19 @@ def _normalize_provider_evidence(item: dict[str, Any], source_type: str) -> dict
 def _normalize_profile_overrides(overrides: dict[str, Any], base: FormatProfile) -> dict[str, Any]:
     data = base.model_dump(mode="json")
     overrides = dict(overrides)
+    source_override = overrides.get("source")
+    if source_override is not None and (
+        not isinstance(source_override, str) or source_override not in {"system", "user", "imported"}
+    ):
+        overrides["source"] = "imported"
+    status_override = overrides.get("status")
+    if status_override is not None and (
+        not isinstance(status_override, str) or status_override not in {"draft", "active", "archived"}
+    ):
+        overrides["status"] = "draft"
     for field_path in UNSUPPORTED_OVERRIDE_FIELDS:
+        overrides.pop(field_path, None)
+    for field_path in IGNORED_PROVIDER_OVERRIDE_KEYS:
         overrides.pop(field_path, None)
     title_override = overrides.pop("title", None)
     if isinstance(title_override, dict):
@@ -629,8 +849,8 @@ def _normalize_profile_overrides(overrides: dict[str, Any], base: FormatProfile)
         if isinstance(headings[0], dict):
             _deep_merge(headings[0], title_override)
     unknown_top_level = sorted(set(overrides) - set(data))
-    if unknown_top_level:
-        raise ExtractionSourceError(f"profile_overrides contains unsupported top-level field(s): {', '.join(unknown_top_level)}")
+    for field_path in unknown_top_level:
+        overrides.pop(field_path, None)
     allowed = _filter_to_shape(overrides, data)
     _normalize_font_defaults(allowed.get("fonts"))
     _normalize_font_container((allowed.get("body") or {}).get("font"))
@@ -639,7 +859,11 @@ def _normalize_profile_overrides(overrides: dict[str, Any], base: FormatProfile)
     _normalize_font_container(((allowed.get("table") or {}).get("caption") or {}).get("font"))
     _normalize_font_container(((allowed.get("figure") or {}).get("caption") or {}).get("font"))
     _normalize_font_container((allowed.get("references") or {}).get("font"))
+    _normalize_font_container((allowed.get("notes") or {}).get("font"))
+    _normalize_font_container((allowed.get("appendix") or {}).get("title_font"))
+    _normalize_font_container((allowed.get("appendix") or {}).get("body_font"))
     _normalize_font_container((allowed.get("header_footer") or {}).get("font"))
+    _normalize_profile_enum_values(allowed)
 
     headings = allowed.get("headings")
     if isinstance(headings, list):
@@ -657,6 +881,154 @@ def _normalize_profile_overrides(overrides: dict[str, Any], base: FormatProfile)
         else:
             allowed.pop("headings", None)
     return allowed
+
+
+def _normalize_profile_enum_values(data: dict[str, Any]) -> None:
+    _normalize_literal_at(data.get("page"), "orientation", {"portrait": "portrait", "纵向": "portrait", "landscape": "landscape", "横向": "landscape"})
+    _normalize_alignment(data.get("body"), "alignment")
+    _normalize_alignment(data.get("equations"), "alignment")
+    _normalize_alignment(data.get("appendix"), "title_alignment")
+    _normalize_alignment(data.get("appendix"), "body_alignment")
+    header_footer = data.get("header_footer")
+    _normalize_alignment(header_footer, "header_alignment")
+    _normalize_alignment(header_footer, "footer_alignment")
+    _normalize_literal_at(
+        header_footer,
+        "page_number_format",
+        {
+            "arabic": "arabic",
+            "阿拉伯": "arabic",
+            "arabic_numbers": "arabic",
+            "roman_lower": "roman_lower",
+            "lower_roman": "roman_lower",
+            "小写罗马": "roman_lower",
+            "roman_upper": "roman_upper",
+            "upper_roman": "roman_upper",
+            "大写罗马": "roman_upper",
+            "none": "none",
+            "无": "none",
+        },
+    )
+    table = data.get("table")
+    _normalize_literal_at(table, "border_style", {"three_line": "three_line", "three_line_table": "three_line", "三线表": "three_line", "full_grid": "full_grid", "grid": "full_grid", "minimal": "minimal", "custom": "custom"})
+    _normalize_literal_at(table, "notes_position", {"none": "none", "below": "below", "下方": "below", "above": "above", "上方": "above"})
+    _normalize_caption(table.get("caption") if isinstance(table, dict) else None)
+    figure = data.get("figure")
+    _normalize_caption(figure.get("caption") if isinstance(figure, dict) else None)
+    _normalize_literal_at(
+        figure,
+        "placement",
+        {
+            "inline": "inline",
+            "in_text": "inline",
+            "inline_at_corresponding_text": "inline",
+            "corresponding_text": "inline",
+            "文中相应处": "inline",
+            "直接给出": "inline",
+            "floating": "floating",
+            "浮动": "floating",
+            "anchored": "anchored",
+            "锚定": "anchored",
+        },
+    )
+    _normalize_literal_at(data.get("equations"), "numbering", {"none": "none", "无": "none", "left": "left", "左": "left", "right": "right", "右": "right"})
+    _normalize_literal_at(data.get("quality"), "strictness", {"lenient": "lenient", "standard": "standard", "strict": "strict", "宽松": "lenient", "标准": "standard", "严格": "strict"})
+    grid = data.get("document_grid")
+    _normalize_literal_at(grid, "type", {"none": "none", "无": "none", "line": "line", "只指定行": "line", "line_and_character": "line_and_character", "lines_and_chars": "line_and_character", "行和字符": "line_and_character"})
+    _normalize_literal_at(data.get("unit_rules"), "unit_spacing", {"preserve": "preserve", "保持": "preserve", "space": "space", "空格": "space", "no_space": "no_space", "无空格": "no_space"})
+    template = data.get("template_binding")
+    _normalize_literal_at(template, "placeholder_policy", {"fail": "fail", "失败": "fail", "preserve": "preserve", "保留": "preserve", "remove": "remove", "移除": "remove"})
+    _normalize_headings_list(data.get("headings"))
+
+
+def _normalize_caption(caption: Any) -> None:
+    if not isinstance(caption, dict):
+        return
+    _normalize_literal_at(caption, "position", {"above": "above", "上方": "above", "正上方": "above", "below": "below", "下方": "below", "正下方": "below"})
+    _normalize_literal_at(caption, "numbering", {"continuous": "continuous", "连续": "continuous", "chapter": "chapter", "按章": "chapter", "section": "section", "按节": "section"})
+
+
+def _normalize_alignment(data: Any, key: str) -> None:
+    _normalize_literal_at(
+        data,
+        key,
+        {
+            "left": "left",
+            "左": "left",
+            "居左": "left",
+            "center": "center",
+            "centered": "center",
+            "居中": "center",
+            "right": "right",
+            "居右": "right",
+            "justified": "justified",
+            "justify": "justified",
+            "两端对齐": "justified",
+        },
+    )
+
+
+def _normalize_literal_at(data: Any, key: str, mapping: dict[str, str]) -> None:
+    if not isinstance(data, dict) or key not in data:
+        return
+    value = data[key]
+    if not isinstance(value, str):
+        return
+    normalized = value.strip()
+    lowered = normalized.lower().replace("-", "_").replace(" ", "_")
+    data[key] = mapping.get(lowered) or mapping.get(normalized) or normalized
+
+
+def _normalize_headings_list(headings: Any) -> None:
+    if not isinstance(headings, list):
+        return
+    for index, heading in enumerate(headings):
+        if not isinstance(heading, dict):
+            continue
+        level = heading.get("level")
+        normalized_level = _normalize_heading_level(level, index)
+        if normalized_level is not None:
+            heading["level"] = normalized_level
+        _normalize_alignment(heading, "alignment")
+        _normalize_literal_at(
+            heading,
+            "numbering",
+            {
+                "decimal-chinese-pause": "decimal-chinese-pause",
+                "decimal-dot": "decimal-dot",
+                "1、": "decimal-chinese-pause",
+                "1.1": "decimal-dot",
+                "1.1.1": "decimal-dot",
+            },
+        )
+        _normalize_font_container(heading.get("font"))
+
+
+def _normalize_heading_level(level: Any, index: int) -> int | None:
+    if isinstance(level, int):
+        return max(1, min(level, 9))
+    if isinstance(level, str):
+        text = level.strip()
+        if text.isdigit():
+            return max(1, min(int(text), 9))
+        lowered = text.lower()
+        aliases = {
+            "document_title_cn": 1,
+            "document_title_en": 1,
+            "title_cn": 1,
+            "title_en": 1,
+            "title": 1,
+            "main_title": 1,
+            "section_heading": 2,
+            "section": 2,
+            "section_title": 2,
+            "heading": 2,
+            "subsection_heading": 3,
+            "subsection": 3,
+        }
+        if lowered in aliases:
+            return aliases[lowered]
+    return index + 1
 
 
 def _filter_to_shape(source: Any, shape: Any) -> Any:
@@ -731,6 +1103,9 @@ def _draft_with_deterministic_rules(
     draft: RequirementDraft,
     base: FormatProfile,
     source: str,
+    locked_fields: list[str] | None = None,
+    extra_evidence: list[ExtractionEvidence] | None = None,
+    source_documents: list[ProfileSourceDocument] | None = None,
 ) -> RequirementDraft:
     deterministic = _deterministic_draft(source_text, base, source)
     direct_items = [item for item in deterministic.summary.items if item.source != "system_default"]
@@ -752,6 +1127,7 @@ def _draft_with_deterministic_rules(
         for item in draft.evidence
         if not _field_covered_by_any(item.field_path, direct_fields)
     ]
+    evidence.extend(extra_evidence or [])
     evidence.extend(deterministic.evidence)
 
     covered = {item.field_path for item in items}
@@ -760,13 +1136,151 @@ def _draft_with_deterministic_rules(
         item
         for item in [*draft.uncertain_items, *deterministic.uncertain_items]
         if not _field_covered(item.field_path, covered)
+        or _uncertain_item_is_unsupported_rule(item)
     ]
+    _attach_profile_v2_metadata(
+        profile,
+        evidence,
+        missing,
+        uncertain,
+        locked_fields=locked_fields or [],
+        source_documents=source_documents or [],
+    )
     return RequirementDraft(
         summary=RequirementSummary(items=items, missing_fields=missing, unsupported_or_uncertain_rules=uncertain),
         profile=profile,
         evidence=evidence,
         uncertain_items=uncertain,
     )
+
+
+def _attach_profile_v2_metadata(
+    profile: FormatProfile,
+    evidence: list[ExtractionEvidence],
+    missing_fields: list[str],
+    uncertain_items: list[UncertainItem],
+    locked_fields: list[str] | None = None,
+    source_documents: list[ProfileSourceDocument] | None = None,
+) -> None:
+    profile.schema_version = "2.0.0"
+    profile.source_documents = _merge_source_documents(profile.source_documents, source_documents or [])
+    profile.llm_final_review.enabled = True
+    profile.llm_final_review.required = True
+    profile.rule_evidence = [
+        ProfileRuleEvidence(
+            field_path=item.field_path,
+            source=item.source,
+            quote=item.quote,
+            note=item.note,
+            confidence=item.confidence,
+        )
+        for item in evidence
+    ]
+    profile.missing_fields = list(dict.fromkeys(missing_fields))
+    profile.locked_fields = list(dict.fromkeys([*profile.locked_fields, *(locked_fields or [])]))
+    missing_set = set(missing_fields)
+    profile.unsupported_rules = [
+        ProfileUnsupportedRule(
+            field_path=item.field_path,
+            message=item.message,
+            suggestion=item.suggestion,
+            source="agent",
+            confidence=0.0,
+        )
+        for item in uncertain_items
+        if item.field_path not in missing_set
+        and _uncertain_item_is_unsupported_rule(item)
+    ]
+    profile.capability_coverage = build_capability_coverage(profile, evidence, profile.locked_fields)
+
+
+def _merge_source_documents(
+    existing: list[ProfileSourceDocument],
+    incoming: list[ProfileSourceDocument],
+) -> list[ProfileSourceDocument]:
+    merged: dict[tuple[str | None, str | None, str], ProfileSourceDocument] = {}
+    for item in [*existing, *incoming]:
+        merged[(item.file_id, item.filename, item.source_kind)] = item
+    return list(merged.values())
+
+
+def _uncertain_item_is_unsupported_rule(item: UncertainItem) -> bool:
+    return (
+        item.field_path in UNSUPPORTED_OVERRIDE_FIELDS
+        or "当前 Profile schema 还不能自动执行" in item.message
+        or "unsupported_rules" in item.suggestion
+    )
+
+
+def _snapshot_locked_fields(profile: FormatProfile, locked_fields: list[str]) -> dict[str, Any]:
+    data = profile.model_dump(mode="json")
+    return {field: value for field in locked_fields if (value := _deep_get(data, field)) is not None}
+
+
+def _restore_locked_fields(profile: FormatProfile, snapshot: dict[str, Any]) -> None:
+    if not snapshot:
+        return
+    data = profile.model_dump(mode="json")
+    manual_overrides = list(data.get("manual_overrides") or [])
+    for field_path, value in snapshot.items():
+        previous = _deep_get(data, field_path)
+        _deep_set(data, field_path, value)
+        if previous != value:
+            manual_overrides.append(
+                ProfileManualOverride(
+                    field_path=field_path,
+                    old_value=previous,
+                    new_value=value,
+                    source="visual",
+                ).model_dump(mode="json")
+            )
+    data["manual_overrides"] = manual_overrides
+    restored = FormatProfile.model_validate(data)
+    for field_name, value in restored:
+        setattr(profile, field_name, value)
+
+
+def _deep_get(data: Any, path: str) -> Any:
+    current = data
+    for part in _path_parts(path):
+        if isinstance(part, int):
+            if not isinstance(current, list) or part >= len(current):
+                return None
+            current = current[part]
+        else:
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+    return current
+
+
+def _deep_set(data: Any, path: str, value: Any) -> None:
+    current = data
+    parts = _path_parts(path)
+    for part in parts[:-1]:
+        if isinstance(part, int):
+            current = current[part]
+        else:
+            current = current[part]
+    last = parts[-1]
+    if isinstance(last, int):
+        current[last] = value
+    else:
+        current[last] = value
+
+
+def _path_parts(path: str) -> list[str | int]:
+    parts: list[str | int] = []
+    for chunk in path.split("."):
+        while "[" in chunk and chunk.endswith("]"):
+            name, index = chunk[:-1].split("[", 1)
+            if name:
+                parts.append(name)
+            parts.append(int(index))
+            chunk = ""
+        if chunk:
+            parts.append(chunk)
+    return parts
 
 
 def _apply_deterministic_profile_field(target: FormatProfile, source: FormatProfile, field: str) -> None:
@@ -1026,6 +1540,23 @@ def _slugify_profile_id(name: str) -> str:
     return f"profile-{digest}"
 
 
+def _next_available_profile_version(repository: JsonMetadataRepository, profile_id: str, requested_version: str) -> str:
+    version = requested_version or "1.0.0"
+    while repository.get_profile_version(profile_id, version) is not None:
+        version = _bump_patch_version(version)
+    return version
+
+
+def _bump_patch_version(version: str) -> str:
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(.*)$", version)
+    if not match:
+        return f"{version}.1"
+    major, minor, patch, suffix = match.groups()
+    if suffix:
+        return f"{major}.{minor}.{int(patch) + 1}"
+    return f"{major}.{minor}.{int(patch) + 1}"
+
+
 def _agent_summary_message(draft: RequirementDraft) -> str:
     missing = "、".join(draft.summary.missing_fields[:6]) if draft.summary.missing_fields else "无"
     return (
@@ -1033,3 +1564,11 @@ def _agent_summary_message(draft: RequirementDraft) -> str:
         f"待确认/缺失字段：{missing}。"
         "确认名称和版本后即可保存为可复用 Profile。"
     )
+
+
+def _attachment_kind_label(source_kind: str) -> str:
+    return {
+        "style_sample_docx": "格式样本文档",
+        "rule_document": "格式规则文档",
+        "natural_language": "自然语言要求",
+    }.get(source_kind, "附件")

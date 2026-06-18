@@ -39,10 +39,13 @@ class JobRecord(BaseModel):
     input_file_id: str
     profile_id: str | None = None
     profile_version: str | None = None
+    template_file_id: str | None = None
+    output_formats: list[str] = Field(default_factory=lambda: ["docx"])
     status: JobStatus = "queued"
     progress: int = 0
     current_step: str | None = None
     output_file_ids: list[str] = Field(default_factory=list)
+    delivery_gate_summary: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -69,12 +72,16 @@ class DeliveryManifestItem(BaseModel):
     fix_loop_ids: list[str] = Field(default_factory=list)
     download_urls: dict[str, str] = Field(default_factory=dict)
     delivery_status: Literal["completed", "manual_review_required", "failed"] = "completed"
+    failure_reason: str | None = None
+    delivery_gate_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class BatchFormatRun(BaseModel):
     batch_id: str
     profile_id: str
     profile_version: str
+    template_file_id: str | None = None
+    output_formats: list[str] = Field(default_factory=lambda: ["docx"])
     input_file_ids: list[str] = Field(min_length=1)
     job_ids: list[str] = Field(default_factory=list)
     status: BatchStatus = "queued"
@@ -87,7 +94,7 @@ class BatchFormatRun(BaseModel):
 
 
 ExtractionStatus = Literal["queued", "running", "completed", "failed", "needs_review"]
-ExtractionSourceType = Literal["document", "natural_language"]
+ExtractionSourceType = Literal["document", "natural_language", "style_sample_docx", "rule_document"]
 RequirementSessionSourceType = Literal["conversation", "document"]
 RequirementSessionStatus = Literal[
     "collecting",
@@ -97,7 +104,8 @@ RequirementSessionStatus = Literal[
     "failed",
 ]
 RequirementMessageRole = Literal["user", "agent", "system"]
-RequirementRuleSource = Literal["conversation", "document", "system_default", "user_confirmed"]
+RequirementRuleSource = Literal["conversation", "document", "style_sample_docx", "rule_document", "system_default", "user_confirmed"]
+RequirementAttachmentSourceKind = Literal["style_sample_docx", "rule_document", "natural_language"]
 
 
 class ExtractionEvidence(BaseModel):
@@ -117,6 +125,13 @@ class UncertainItem(BaseModel):
 class RequirementSessionMessage(BaseModel):
     role: RequirementMessageRole
     content: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class RequirementSessionAttachment(BaseModel):
+    file_id: str | None = None
+    source_kind: RequirementAttachmentSourceKind
+    filename: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -143,7 +158,9 @@ class RequirementSession(BaseModel):
     status: RequirementSessionStatus = "collecting"
     file_id: str | None = None
     natural_language: str | None = None
+    attachments: list[RequirementSessionAttachment] = Field(default_factory=list)
     messages: list[RequirementSessionMessage] = Field(default_factory=list)
+    locked_fields: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     requirement_summary: RequirementSummary | None = None
     profile_draft: FormatProfile | None = None

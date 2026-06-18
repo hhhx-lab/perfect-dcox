@@ -66,6 +66,7 @@ table:
   caption:
     position: above
     prefix: 表
+    numbering: continuous
     font:
       chinese: SimSun
       latin: Times New Roman
@@ -76,6 +77,7 @@ figure:
   caption:
     position: below
     prefix: 图
+    numbering: continuous
     font:
       chinese: SimSun
       latin: Times New Roman
@@ -95,6 +97,33 @@ references:
     weight: normal
     color: '000000'
   hanging_indent_chars: 2
+notes:
+  font:
+    chinese: SimSun
+    latin: Times New Roman
+    size_pt: 9
+    weight: normal
+    color: '000000'
+  line_spacing: 1.0
+  space_before_pt: 0
+  space_after_pt: 0
+appendix:
+  title_font:
+    chinese: SimHei
+    latin: Times New Roman
+    size_pt: 12
+    weight: bold
+    color: '000000'
+  body_font:
+    chinese: SimSun
+    latin: Times New Roman
+    size_pt: 12
+    weight: normal
+    color: '000000'
+  title_alignment: left
+  body_alignment: justified
+  body_line_spacing: 1.5
+  body_first_line_indent_chars: 2
 header_footer:
   header_text: null
   header_alignment: center
@@ -113,3 +142,10 @@ quality:
   check_headings: true
   check_references: true
   strictness: standard
+llm_final_review:
+  enabled: false
+  required: false
+  check_garbled_text: true
+  check_blank_pages: true
+  check_overlap: true
+  check_table_figure_overflow: true

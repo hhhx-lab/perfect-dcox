@@ -131,7 +131,9 @@ def test_agent_confirmed_custom_profile_can_drive_batch_export_quality_gate(tmp_
     item = payload["items"][0]
     assert item["delivery_status"] == "completed"
     assert item["final_docx_file_id"]
-    assert item["quality_report_id"]
+    assert item["quality_report_id"] is None
+    assert item["fix_loop_ids"] == []
+    assert item["delivery_gate_summary"]["docx"]["passed"] is True
 
     output_meta = client.get(f"/api/files/{item['final_docx_file_id']}").json()
     output_doc = Document(output_meta["storage_path"])
@@ -141,7 +143,4 @@ def test_agent_confirmed_custom_profile_can_drive_batch_export_quality_gate(tmp_
     assert round(section.top_margin.cm, 1) == 1.5
     assert "自定义课程模板" in "\n".join(paragraph.text for paragraph in section.header.paragraphs)
 
-    report = client.get(f"/api/quality-reports/{item['quality_report_id']}").json()
-    assert report["summary"]["all_compliant"] is True
-    assert report["summary"]["remaining_issue_count"] == 0
-    assert {issue["status"] for issue in report["issues"]} == {"pass"}
+    assert item["delivery_gate_summary"]["docx"]["remaining_issue_count"] == 0

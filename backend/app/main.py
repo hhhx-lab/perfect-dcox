@@ -15,8 +15,10 @@ from app.api.profiles import build_profiles_router
 from app.api.quality_reports import build_quality_reports_router
 from app.api.requirement_sessions import build_requirement_sessions_router
 from app.core.config import Settings, get_settings
+from app.llm.diagnostics import check_llm_connectivity, unverified_llm_status
 from app.profiles.seed import load_builtin_profiles
 from app.quality.fix_execution import FixLoopExecutionService
+from app.quality.final_layout_review import OpenAICompatibleFinalLayoutReviewer
 from app.quality.service import QualityReportService
 from app.storage.local import LocalFileStorage
 from app.storage.repository import JsonMetadataRepository
@@ -37,6 +39,11 @@ def create_app(
     )
     repository = JsonMetadataRepository(app_settings.file_storage_root / "metadata.json")
     file_storage = LocalFileStorage(app_settings.file_storage_root)
+    final_layout_reviewer = (
+        OpenAICompatibleFinalLayoutReviewer(app_settings)
+        if app_settings.llm_configured
+        else None
+    )
     extraction_service = ProfileExtractionService(
         repository,
         app_settings.file_storage_root,
@@ -68,18 +75,33 @@ def create_app(
                 "database_configured": bool(app_settings.database_url),
                 "redis_configured": bool(app_settings.redis_url),
                 "llm_configured": app_settings.llm_configured,
+                "llm_status": unverified_llm_status(app_settings),
                 "soffice_configured": app_settings.soffice_configured,
             },
         }
 
+    @app.get(f"{app_settings.api_prefix}/health/llm")
+    def llm_health() -> dict[str, object]:
+        return check_llm_connectivity(app_settings).to_dict()
+
     app.include_router(build_files_router(repository, file_storage), prefix=app_settings.api_prefix)
     app.include_router(build_profiles_router(repository), prefix=app_settings.api_prefix)
     app.include_router(
-        build_jobs_router(repository, file_storage=file_storage, soffice_bin=app_settings.soffice_bin),
+        build_jobs_router(
+            repository,
+            file_storage=file_storage,
+            soffice_bin=app_settings.soffice_bin,
+            final_layout_reviewer=final_layout_reviewer,
+        ),
         prefix=app_settings.api_prefix,
     )
     app.include_router(
-        build_batches_router(repository, file_storage=file_storage, soffice_bin=app_settings.soffice_bin),
+        build_batches_router(
+            repository,
+            file_storage=file_storage,
+            soffice_bin=app_settings.soffice_bin,
+            final_layout_reviewer=final_layout_reviewer,
+        ),
         prefix=app_settings.api_prefix,
     )
     app.include_router(build_profile_extractions_router(extraction_service), prefix=app_settings.api_prefix)

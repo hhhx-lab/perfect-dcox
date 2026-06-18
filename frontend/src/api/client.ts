@@ -1,3 +1,14 @@
+export type LLMHealthStatus = "not_configured" | "configured_unverified" | "reachable" | "unreachable";
+
+export type LLMHealth = {
+  configured: boolean;
+  reachable: boolean | null;
+  status: LLMHealthStatus | string;
+  model: string | null;
+  base_url: string;
+  error_message: string | null;
+};
+
 export type ServiceHealth = {
   status: string;
   app_name: string;
@@ -5,6 +16,7 @@ export type ServiceHealth = {
     database_configured: boolean;
     redis_configured: boolean;
     llm_configured: boolean;
+    llm_status: LLMHealth;
     soffice_configured: boolean;
   };
 };
@@ -25,6 +37,8 @@ export type JobRecord = {
   input_file_id: string;
   profile_id: string | null;
   profile_version: string | null;
+  template_file_id: string | null;
+  output_formats: Array<"docx" | "pdf" | string>;
   status:
     | "queued"
     | "running"
@@ -36,6 +50,7 @@ export type JobRecord = {
   progress: number;
   current_step: string | null;
   output_file_ids: string[];
+  delivery_gate_summary: Record<string, unknown>;
   error_message: string | null;
   created_at: string;
   updated_at: string;
@@ -50,12 +65,16 @@ export type DeliveryManifestItem = {
   fix_loop_ids: string[];
   download_urls: Record<string, string>;
   delivery_status: "completed" | "manual_review_required" | "failed";
+  failure_reason: string | null;
+  delivery_gate_summary: Record<string, unknown>;
 };
 
 export type BatchFormatRun = {
   batch_id: string;
   profile_id: string;
   profile_version: string;
+  template_file_id: string | null;
+  output_formats: Array<"docx" | "pdf" | string>;
   input_file_ids: string[];
   job_ids: string[];
   status:
@@ -76,8 +95,9 @@ export type BatchFormatRun = {
 };
 
 export type ExtractionStatus = "queued" | "running" | "completed" | "failed" | "needs_review";
-export type ExtractionSourceType = "document" | "natural_language";
+export type ExtractionSourceType = "document" | "natural_language" | "style_sample_docx" | "rule_document";
 export type RequirementSessionSourceType = "conversation" | "document";
+export type RequirementAttachmentSourceKind = "style_sample_docx" | "rule_document" | "natural_language";
 export type RequirementSessionStatus =
   | "collecting"
   | "needs_user_answer"
@@ -120,6 +140,7 @@ export type TextFont = {
 };
 
 export type FormatProfile = {
+  schema_version: string;
   id: string;
   name: string;
   version: string;
@@ -147,12 +168,20 @@ export type FormatProfile = {
     first_line_indent_chars: number;
     line_spacing: number;
     alignment: "left" | "center" | "right" | "justified";
+    space_before_pt: number;
+    space_after_pt: number;
   };
   headings: Array<{
     level: number;
     font: TextFont;
     alignment: "left" | "center" | "right" | "justified";
     numbering: string;
+    line_spacing: number | null;
+    space_before_pt: number;
+    space_after_pt: number;
+    first_line_indent_chars: number;
+    keep_with_next: boolean;
+    page_break_before: boolean;
   }>;
   abstract: {
     length_range_chars: {
@@ -167,14 +196,32 @@ export type FormatProfile = {
       position: "above" | "below";
       prefix: string;
       font: TextFont;
+      bilingual: boolean;
+      english_prefix: string | null;
+      separator: string;
+      numbering: "continuous" | "chapter" | "section";
     };
+    border_style: "three_line" | "full_grid" | "minimal" | "custom";
+    header_repeat: boolean;
+    autofit: boolean;
+    notes_position: "none" | "below" | "above";
+    enforce_caption_above: boolean;
   };
   figure: {
     caption: {
       position: "above" | "below";
       prefix: string;
       font: TextFont;
+      bilingual: boolean;
+      english_prefix: string | null;
+      separator: string;
+      numbering: "continuous" | "chapter" | "section";
     };
+    placement: "inline" | "floating" | "anchored";
+    half_column_max_mm: number;
+    full_width_min_mm: number;
+    full_width_max_mm: number;
+    enforce_caption_below: boolean;
   };
   equations: {
     alignment: "left" | "center" | "right" | "justified";
@@ -186,12 +233,31 @@ export type FormatProfile = {
     font: TextFont;
     hanging_indent_chars: number;
   };
+  notes: {
+    font: TextFont;
+    line_spacing: number;
+    space_before_pt: number;
+    space_after_pt: number;
+  };
+  appendix: {
+    title_font: TextFont;
+    body_font: TextFont;
+    title_alignment: "left" | "center" | "right" | "justified";
+    body_alignment: "left" | "center" | "right" | "justified";
+    body_line_spacing: number;
+    body_first_line_indent_chars: number;
+  };
   header_footer: {
     header_text: string | null;
     header_alignment: "left" | "center" | "right" | "justified";
+    footer_text: string | null;
     footer_page_number: boolean;
     footer_alignment: "left" | "center" | "right" | "justified";
     font: TextFont;
+    different_first_page: boolean;
+    different_odd_even: boolean;
+    page_number_format: "arabic" | "roman_lower" | "roman_upper" | "none";
+    page_number_start: number;
   };
   quality: {
     check_margins: boolean;
@@ -201,6 +267,112 @@ export type FormatProfile = {
     check_references: boolean;
     strictness: "lenient" | "standard" | "strict";
   };
+  document_grid: {
+    enabled: boolean;
+    type: "none" | "line" | "line_and_character";
+    characters_per_line: number | null;
+    lines_per_page: number | null;
+    snap_to_grid: boolean;
+  };
+  toc: {
+    enabled: boolean;
+    title: string;
+    include_levels: number;
+    show_page_numbers: boolean;
+    right_align_page_numbers: boolean;
+    use_hyperlinks: boolean;
+    update_fields_on_open: boolean;
+  };
+  sections: Array<{
+    key: string;
+    title: string | null;
+    start_on_new_page: boolean;
+    required: boolean;
+    style_ref: string | null;
+  }>;
+  list_numbering: {
+    ordered_pattern: string;
+    unordered_marker: string;
+    multilevel_enabled: boolean;
+    restart_per_section: boolean;
+  };
+  numbering: {
+    enabled: boolean;
+    heading_pattern: string | null;
+    restart_per_section: boolean;
+  };
+  unit_rules: {
+    enforce_consistency: boolean;
+    measurement_units: string[];
+    currency_units: string[];
+    unit_spacing: "preserve" | "space" | "no_space";
+    use_si_symbols: boolean;
+    normalize_fullwidth_numbers: boolean;
+  };
+  template_binding: {
+    template_file_id: string | null;
+    template_name: string | null;
+    body_slot: string | null;
+    fixed_sections: string[];
+    inherit_header_footer: boolean;
+    placeholder_policy: "fail" | "preserve" | "remove";
+  };
+  delivery_gate: {
+    require_internal_qc: boolean;
+    allow_auto_fix: boolean;
+    require_pdf_inspection: boolean;
+    fail_on_unsupported_rules: boolean;
+  };
+  source_documents: Array<{
+    file_id: string | null;
+    filename: string | null;
+    source_kind: "agent" | "style_sample_docx" | "rule_document" | "natural_language" | "visual" | "system";
+    extracted_at: string | null;
+    note: string | null;
+  }>;
+  capability_coverage: Array<{
+    field_path: string;
+    frontend: "supported" | "partial" | "extract_only" | "template_delegated" | "unsupported";
+    agent: "supported" | "partial" | "extract_only" | "template_delegated" | "unsupported";
+    formatter: "supported" | "partial" | "extract_only" | "template_delegated" | "unsupported";
+    qc: "supported" | "partial" | "extract_only" | "template_delegated" | "unsupported";
+    llm_final_review: "supported" | "partial" | "extract_only" | "template_delegated" | "unsupported";
+    source: "agent" | "style_sample_docx" | "rule_document" | "natural_language" | "visual" | "system";
+    locked_by_user: boolean;
+    unsupported_behavior: "block" | "warn";
+    note: string | null;
+  }>;
+  manual_overrides: Array<{
+    field_path: string;
+    old_value: unknown;
+    new_value: unknown;
+    source: "visual" | "conversation";
+    updated_at: string;
+  }>;
+  locked_fields: string[];
+  llm_final_review: {
+    enabled: boolean;
+    required: boolean;
+    check_garbled_text: boolean;
+    check_blank_pages: boolean;
+    check_overlap: boolean;
+    check_table_figure_overflow: boolean;
+  };
+  rule_evidence: Array<{
+    field_path: string;
+    source: string;
+    quote: string | null;
+    note: string | null;
+    confidence: number;
+  }>;
+  missing_fields: string[];
+  unsupported_rules: Array<{
+    field_path: string;
+    message: string;
+    suggestion: string | null;
+    source: string | null;
+    confidence: number;
+  }>;
 };
 
 export type ProfileExtractionRecord = {
@@ -227,7 +399,7 @@ export type RequirementRuleItem = {
   field_path: string;
   label: string;
   value: string;
-  source: "conversation" | "document" | "system_default" | "user_confirmed";
+  source: "conversation" | "document" | "style_sample_docx" | "rule_document" | "system_default" | "user_confirmed";
   confidence: number;
   evidence: string[];
   needs_confirmation: boolean;
@@ -246,7 +418,14 @@ export type RequirementSession = {
   status: RequirementSessionStatus;
   file_id: string | null;
   natural_language: string | null;
+  attachments: Array<{
+    file_id: string | null;
+    source_kind: RequirementAttachmentSourceKind;
+    filename: string | null;
+    created_at: string;
+  }>;
   messages: RequirementSessionMessage[];
+  locked_fields: string[];
   missing_fields: string[];
   requirement_summary: RequirementSummary | null;
   profile_draft: FormatProfile | null;
@@ -345,7 +524,13 @@ export type FixLoopRecord = {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, init);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown network error";
+    throw new Error(`无法连接后端 API (${API_BASE_URL})：${detail}`);
+  }
   if (!response.ok) {
     const raw = await response.text();
     let message = raw;
@@ -363,6 +548,7 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 export const apiClient = {
   baseUrl: API_BASE_URL,
   getHealth: () => requestJson<ServiceHealth>("/health"),
+  getLlmHealth: () => requestJson<LLMHealth>("/health/llm"),
   uploadFile: (file: File) => {
     const formData = new FormData();
     formData.append("file", file);
@@ -371,17 +557,22 @@ export const apiClient = {
       body: formData,
     });
   },
-  createJob: (fileId: string, profile?: { profile_id: string; profile_version: string }) =>
+  createJob: (
+    fileId: string,
+    profile?: { profile_id: string; profile_version: string },
+    options?: { template_file_id?: string | null; output_formats?: Array<"docx" | "pdf"> },
+  ) =>
     requestJson<JobRecord>("/jobs", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ input_file_id: fileId, ...profile }),
+      body: JSON.stringify({ input_file_id: fileId, ...profile, ...options }),
   }),
   createBatch: (payload: {
     profile_id: string;
     profile_version: string;
+    template_file_id?: string | null;
     input_file_ids: string[];
     output_formats: Array<"docx" | "pdf">;
     auto_quality: boolean;
@@ -417,6 +608,9 @@ export const apiClient = {
     source_type: RequirementSessionSourceType;
     file_id?: string | null;
     natural_language?: string | null;
+    attachments?: Array<{ file_id?: string | null; source_kind: RequirementAttachmentSourceKind; filename?: string | null }>;
+    current_profile?: FormatProfile | null;
+    locked_fields?: string[];
   }) =>
     requestJson<RequirementSession>("/requirement-sessions", {
       method: "POST",
@@ -426,13 +620,34 @@ export const apiClient = {
       body: JSON.stringify(payload),
     }),
   getRequirementSession: (sessionId: string) => requestJson<RequirementSession>(`/requirement-sessions/${sessionId}`),
-  addRequirementMessage: (sessionId: string, content: string) =>
+  addRequirementMessage: (
+    sessionId: string,
+    content: string,
+    options?: { current_profile?: FormatProfile | null; locked_fields?: string[] },
+  ) =>
     requestJson<RequirementSession>(`/requirement-sessions/${sessionId}/messages`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, ...options }),
+    }),
+  addRequirementAttachment: (
+    sessionId: string,
+    payload: {
+      file_id: string;
+      source_kind: RequirementAttachmentSourceKind;
+      filename?: string | null;
+      current_profile?: FormatProfile | null;
+      locked_fields?: string[];
+    },
+  ) =>
+    requestJson<RequirementSession>(`/requirement-sessions/${sessionId}/attachments`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
     }),
   confirmRequirementSession: (
     sessionId: string,

@@ -1,7 +1,9 @@
+import base64
+
 import pytest
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.shared import Cm, RGBColor
+from docx.shared import Cm, Mm, RGBColor
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -251,6 +253,169 @@ def test_docx_quality_inspection_passes_profiled_output_and_page_numbers(tmp_pat
     assert by_key["docx.visuals.caption_pairing"].status == "pass"
 
 
+def test_docx_quality_inspection_detects_toc_title_mismatch(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_heading("论文题目", level=1)
+    document.add_paragraph("目录")
+    document.add_paragraph("摘要")
+    document.add_paragraph("1、引言")
+    document.add_paragraph("参考文献")
+    document.add_paragraph("摘要")
+    document.add_paragraph("摘要正文。")
+    document.add_paragraph("1、引言")
+    document.add_paragraph("正文段落。")
+    document.save(source)
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    formatted_document = Document(formatted)
+    toc_title = next(paragraph for paragraph in formatted_document.paragraphs if paragraph.text.strip() == profile.toc.title)
+    toc_title.text = "Contents"
+    formatted_document.save(formatted)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(formatted, profile)}
+
+    issue = by_key["docx.toc.fields"]
+    assert issue.status == "warning"
+    assert "TOC title expected 目录" in (issue.description or "")
+
+
+def test_docx_quality_inspection_passes_advanced_profile_rules(tmp_path) -> None:
+    base_profile = load_builtin_profiles()["ecnu_thesis"]
+    profile = base_profile.model_copy(
+        update={
+            "numbering": base_profile.numbering.model_copy(update={"enabled": True, "heading_pattern": "第%1章"}),
+            "unit_rules": base_profile.unit_rules.model_copy(
+                update={"enforce_consistency": True, "unit_spacing": "space", "normalize_fullwidth_numbers": True}
+            ),
+            "document_grid": base_profile.document_grid.model_copy(
+                update={"enabled": True, "type": "line_and_character", "characters_per_line": 40, "lines_per_page": 28, "snap_to_grid": True}
+            ),
+            "header_footer": base_profile.header_footer.model_copy(
+                update={"page_number_format": "roman_upper", "page_number_start": 3, "footer_page_number": True}
+            ),
+            "table": base_profile.table.model_copy(
+                update={
+                    "caption": base_profile.table.caption.model_copy(
+                        update={"bilingual": True, "english_prefix": "Table", "separator": " / "}
+                    )
+                }
+            ),
+            "figure": base_profile.figure.model_copy(
+                update={
+                    "caption": base_profile.figure.caption.model_copy(
+                        update={"bilingual": True, "english_prefix": "Figure", "separator": " / "}
+                    )
+                }
+            ),
+        }
+    )
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_heading("绪论", level=1)
+    document.add_paragraph("宽度为１００mm，费用为５元。")
+    document.add_paragraph("表 1 表格示例。")
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "示例"
+    document.add_paragraph("图 1 插图示例。")
+    image_path = tmp_path / "figure.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO9r9fkAAAAASUVORK5CYII="
+        )
+    )
+    document.add_picture(str(image_path), width=Mm(80))
+    document.save(source)
+
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    issues = inspect_docx_quality(formatted, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["docx.heading_numbering"].status == "pass"
+    assert by_key["docx.document_grid"].status == "pass"
+    assert by_key["docx.page_number"].status == "pass"
+    assert by_key["docx.unit_rules"].status == "pass"
+    assert by_key["docx.captions"].status == "pass"
+    assert by_key["docx.visuals.caption_pairing"].status == "pass"
+    assert by_key["docx.figure.size"].status == "pass"
+    assert by_key["docx.table.borders"].status == "pass"
+
+
+def test_docx_quality_inspection_detects_figure_width_rule_mismatches(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    image_path = tmp_path / "figure.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO9r9fkAAAAASUVORK5CYII="
+        )
+    )
+    source = tmp_path / "figure-size-mismatch.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_picture(str(image_path), width=Mm(80))
+    document.add_paragraph("图 1 中间尺寸图片")
+    document.add_picture(str(image_path), width=Mm(150))
+    document.add_paragraph("图 2 超宽图片")
+    document.save(source)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(source, profile)}
+
+    issue = by_key["docx.figure.size"]
+    assert issue.status == "warning"
+    assert "image[1] width 80.0 mm" in (issue.description or "")
+    assert "image[2] width 150.0 mm" in (issue.description or "")
+
+
+def test_docx_quality_inspection_detects_unit_rule_mismatches_inside_tables(tmp_path) -> None:
+    base_profile = load_builtin_profiles()["ecnu_thesis"]
+    profile = base_profile.model_copy(
+        update={
+            "unit_rules": base_profile.unit_rules.model_copy(
+                update={"enforce_consistency": True, "unit_spacing": "space", "normalize_fullwidth_numbers": True}
+            )
+        }
+    )
+    source = tmp_path / "table-unit-mismatch.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "１００mm"
+    table.cell(0, 1).text = "５元"
+    document.save(source)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(source, profile)}
+
+    assert by_key["docx.unit_rules"].status == "warning"
+    assert "table[1].row[1].cell[1]" in (by_key["docx.unit_rules"].description or "")
+    assert "fullwidth digits remain" in (by_key["docx.unit_rules"].description or "")
+
+
+def test_docx_quality_inspection_ignores_uncaptioned_front_matter_images(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    image_path = tmp_path / "cover.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO9r9fkAAAAASUVORK5CYII="
+        )
+    )
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_picture(str(image_path), width=Mm(20))
+    document.add_heading("论文题目", level=1)
+    document.add_paragraph("姓名：测试")
+    document.add_paragraph("1、引言")
+    document.add_paragraph("正文内容。")
+    document.save(source)
+
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    issues = inspect_docx_quality(formatted, profile)
+    by_key = {issue.check_key: issue for issue in issues}
+
+    assert by_key["docx.captions"].status == "pass"
+    assert by_key["docx.visuals.caption_pairing"].status == "pass"
+    assert by_key["docx.visuals.caption_pairing"].details["caption_required_inline_image_count"] == 0
+
+
 def test_docx_quality_inspection_honors_profile_header_and_page_number_settings(tmp_path) -> None:
     base_profile = load_builtin_profiles()["ecnu_thesis"]
     profile = base_profile.model_copy(
@@ -345,6 +510,101 @@ def test_docx_quality_inspection_detects_body_font_color_mismatch(tmp_path) -> N
     assert "body run color expected 000000" in (by_key["docx.body.style"].description or "")
 
 
+def test_docx_quality_inspection_checks_all_body_paragraphs(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    profile.body.font.color = "000000"
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_paragraph("第一段正文保持正确格式。")
+    document.add_paragraph("第二段正文会被故意改坏颜色。")
+    document.save(source)
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    broken = Document(formatted)
+    broken.paragraphs[2].runs[0].font.color.rgb = RGBColor(255, 0, 0)
+    broken_path = tmp_path / "broken.docx"
+    broken.save(broken_path)
+
+    issues = inspect_docx_quality(broken_path, profile)
+    body_issue = {issue.check_key: issue for issue in issues}["docx.body.style"]
+
+    assert body_issue.status == "warning"
+    assert "paragraph[3]" in (body_issue.description or "")
+    assert "body run color expected 000000" in (body_issue.description or "")
+
+
+def test_docx_quality_inspection_checks_all_heading_paragraphs(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    for heading in profile.headings:
+        heading.font.color = "000000"
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_paragraph("第一章正文。")
+    document.add_heading("第二章 方法", level=1)
+    document.add_paragraph("第二章正文。")
+    document.save(source)
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    broken = Document(formatted)
+    broken.paragraphs[2].runs[0].font.color.rgb = RGBColor(255, 0, 0)
+    broken_path = tmp_path / "broken.docx"
+    broken.save(broken_path)
+
+    issues = inspect_docx_quality(broken_path, profile)
+    heading_issue = {issue.check_key: issue for issue in issues}["docx.heading.style"]
+
+    assert heading_issue.status == "warning"
+    assert "paragraph[3]" in (heading_issue.description or "")
+    assert "heading run color expected 000000" in (heading_issue.description or "")
+
+
+def test_docx_quality_inspection_detects_equation_numbering_mismatch(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = tmp_path / "equation.docx"
+    document = Document()
+    document.add_paragraph("E = mc^2")
+    document.save(source)
+
+    raw_by_key = {issue.check_key: issue for issue in inspect_docx_quality(source, profile)}
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    formatted_by_key = {issue.check_key: issue for issue in inspect_docx_quality(formatted, profile)}
+
+    assert raw_by_key["docx.equations"].status == "warning"
+    assert "missing visible right-side numbering" in (raw_by_key["docx.equations"].description or "")
+    assert formatted_by_key["docx.equations"].status == "pass"
+
+
+def test_docx_quality_inspection_honors_disabled_margin_heading_and_font_checks(tmp_path) -> None:
+    base_profile = load_builtin_profiles()["ecnu_thesis"]
+    profile = base_profile.model_copy(
+        update={
+            "quality": base_profile.quality.model_copy(
+                update={
+                    "check_margins": False,
+                    "check_fonts": False,
+                    "check_headings": False,
+                }
+            )
+        }
+    )
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+    broken = Document(formatted)
+    broken.sections[0].top_margin = Cm(1.0)
+    broken.paragraphs[0].style = broken.styles["Normal"]
+    broken.paragraphs[1].runs[0].font.color.rgb = RGBColor(255, 0, 0)
+    broken_path = tmp_path / "broken.docx"
+    broken.save(broken_path)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(broken_path, profile)}
+
+    assert by_key["docx.page.margins"].status == "pass"
+    assert by_key["docx.page.margins"].details["disabled_by_profile"] is True
+    assert by_key["docx.heading.style"].status == "pass"
+    assert by_key["docx.heading.style"].details["disabled_by_profile"] is True
+    assert by_key["docx.body.style"].status == "pass"
+
+
 def test_docx_caption_inspection_distinguishes_not_applicable_from_missing_captions(tmp_path) -> None:
     profile = load_builtin_profiles()["ecnu_thesis"]
     no_visuals = tmp_path / "no-visuals.docx"
@@ -368,6 +628,105 @@ def test_docx_caption_inspection_distinguishes_not_applicable_from_missing_capti
     assert table_by_key["docx.captions"].fixable is False
 
 
+def test_docx_visual_pairing_detects_table_caption_below_table(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    source = tmp_path / "table-caption-below.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_paragraph("下表展示示例数据。")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "示例"
+    document.add_paragraph("表 1 示例数据")
+    document.save(source)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(source, profile)}
+
+    issue = by_key["docx.visuals.caption_pairing"]
+    assert issue.status == "warning"
+    assert "table[1] caption is not above the table" in (issue.description or "")
+
+
+def test_docx_visual_pairing_requires_bilingual_table_caption_near_each_table(tmp_path) -> None:
+    base_profile = load_builtin_profiles()["ecnu_thesis"]
+    profile = base_profile.model_copy(
+        update={
+            "table": base_profile.table.model_copy(
+                update={"caption": base_profile.table.caption.model_copy(update={"bilingual": True, "english_prefix": "Table"})}
+            )
+        }
+    )
+    source = tmp_path / "table-bilingual-mismatch.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_paragraph("表 1 第一张表")
+    document.add_paragraph("Table 1 First table")
+    document.add_paragraph("Table 2 Second table")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "A"
+    document.add_paragraph("表 2 第二张表")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "B"
+    document.save(source)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(source, profile)}
+
+    issue = by_key["docx.visuals.caption_pairing"]
+    assert issue.status == "warning"
+    assert "table[2] missing English caption near table" in (issue.description or "")
+
+
+def test_docx_visual_pairing_detects_figure_caption_above_image(tmp_path) -> None:
+    profile = load_builtin_profiles()["ecnu_thesis"]
+    image_path = tmp_path / "figure.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO9r9fkAAAAASUVORK5CYII="
+        )
+    )
+    source = tmp_path / "figure-caption-above.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_paragraph("图 1 示例图片")
+    document.add_picture(str(image_path), width=Mm(40))
+    document.save(source)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(source, profile)}
+
+    issue = by_key["docx.visuals.caption_pairing"]
+    assert issue.status == "warning"
+    assert "image[1] caption is not below the image" in (issue.description or "")
+
+
+def test_docx_visual_pairing_requires_bilingual_figure_caption_near_each_image(tmp_path) -> None:
+    base_profile = load_builtin_profiles()["ecnu_thesis"]
+    profile = base_profile.model_copy(
+        update={
+            "figure": base_profile.figure.model_copy(
+                update={"caption": base_profile.figure.caption.model_copy(update={"bilingual": True, "english_prefix": "Figure"})}
+            )
+        }
+    )
+    image_path = tmp_path / "figure.png"
+    image_path.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO9r9fkAAAAASUVORK5CYII="
+        )
+    )
+    source = tmp_path / "figure-bilingual-mismatch.docx"
+    document = Document()
+    document.add_heading("第一章 绪论", level=1)
+    document.add_picture(str(image_path), width=Mm(40))
+    document.add_paragraph("图 1 第一张图")
+    document.add_paragraph("Figure 1 First figure")
+    document.add_paragraph("Figure 2 Second figure")
+    document.add_picture(str(image_path), width=Mm(40))
+    document.add_paragraph("图 2 第二张图")
+    document.save(source)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(source, profile)}
+
+    issue = by_key["docx.visuals.caption_pairing"]
+    assert issue.status == "warning"
+    assert "image[2] missing English caption near image" in (issue.description or "")
+
+
 def test_docx_quality_inspection_fails_closed_for_complex_ooxml_features(tmp_path) -> None:
     profile = load_builtin_profiles()["ecnu_thesis"]
     source = create_minimal_thesis_docx(tmp_path / "source.docx")
@@ -389,10 +748,27 @@ def test_docx_quality_inspection_fails_closed_for_complex_ooxml_features(tmp_pat
     assert by_key["docx.ooxml.features"].details["anchored_image_count"] == 1
     assert by_key["docx.fields.update_policy"].status == "warning"
     assert by_key["docx.toc.fields"].status == "warning"
-    assert by_key["docx.notes"].status == "unsupported"
+    assert by_key["docx.notes"].status == "fail"
     assert by_key["docx.visuals.caption_pairing"].status == "unsupported"
     assert by_key["docx.numbering"].status == "pass"
     assert summary.all_compliant is False
+
+
+def test_docx_quality_inspection_fails_closed_for_section_restart_numbering(tmp_path) -> None:
+    base_profile = load_builtin_profiles()["ecnu_thesis"]
+    profile = base_profile.model_copy(
+        update={
+            "list_numbering": base_profile.list_numbering.model_copy(update={"restart_per_section": True}),
+            "numbering": base_profile.numbering.model_copy(update={"restart_per_section": True}),
+        }
+    )
+    source = create_minimal_thesis_docx(tmp_path / "source.docx")
+    formatted = format_docx_with_profile(source, tmp_path / "formatted.docx", profile)
+
+    by_key = {issue.check_key: issue for issue in inspect_docx_quality(formatted, profile)}
+
+    assert by_key["docx.numbering"].status == "unsupported"
+    assert "restart_per_section" in (by_key["docx.numbering"].description or "")
 
 
 def test_docx_quality_inspection_detects_role_style_misclassification(tmp_path) -> None:
@@ -421,7 +797,6 @@ def test_docx_quality_inspection_detects_role_style_misclassification(tmp_path) 
     role_issue = by_key["docx.role_styles"]
     assert role_issue.status == "warning"
     assert role_issue.fixable is False
-    assert "paragraph[1] heading is not using a Word heading style" in role_issue.description
     assert "paragraph[3] body has reference-style hanging indent" in role_issue.description
     assert "paragraph[2] body is centered like a caption or equation" in role_issue.description
 

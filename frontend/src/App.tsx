@@ -1,60 +1,244 @@
 import {
-  AlertTriangle,
+  AlertCircle,
+  Braces,
   CheckCircle2,
-  ClipboardCheck,
   Download,
-  FileSearch,
   FileText,
   FolderOpen,
-  LayoutDashboard,
+  Layers3,
   ListChecks,
   MessageSquareText,
-  Plus,
+  PencilRuler,
   RefreshCcw,
   Save,
+  Search,
   ShieldCheck,
   Upload,
 } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   apiClient,
   BatchFormatRun,
   DeliveryManifestItem,
   FileRecord,
-  FixLoopRecord,
-  FixPlan,
   FormatProfile,
   JobRecord,
+  LLMHealth,
   ProfileSummary,
-  QualityReport,
-  QualityStatus,
   RequirementSession,
   ServiceHealth,
+  TextFont,
+  RequirementAttachmentSourceKind,
 } from "./api/client";
 
-const workflowAreas = [
-  { title: "获取格式需求", description: "对话 Agent 或格式文档分析", icon: MessageSquareText, anchor: "intake" },
-  { title: "确认 Profile", description: "命名、保存、版本化", icon: FileText, anchor: "profile" },
-  { title: "上传并处理", description: "选择 Profile 后排版", icon: Upload, anchor: "process" },
-  { title: "下载与质检", description: "DOCX / PDF / 报告", icon: FolderOpen, anchor: "delivery" },
+type IntakeMode = "conversation" | "document" | "visual";
+type OutputFormat = "docx" | "pdf";
+type CoverageFilter = "all" | "supported" | "partial" | "unsupported" | "locked" | "missing" | "evidence";
+
+const steps = [
+  { id: "profile", label: "Profile", icon: PencilRuler },
+  { id: "template", label: "Template", icon: Layers3 },
+  { id: "source", label: "Source", icon: Upload },
+  { id: "delivery", label: "Delivery", icon: Download },
 ];
-
-const qualityStatusOrder: QualityStatus[] = ["pass", "fixed", "warning", "fail", "unsupported"];
-
-const qualityStatusLabels: Record<QualityStatus, string> = {
-  pass: "通过",
-  fixed: "已修复",
-  warning: "警告",
-  fail: "失败",
-  unsupported: "无法判断",
-};
 
 function profileKey(profileId: string, version: string) {
   return `${profileId}@${version}`;
 }
 
+function bumpPatchVersion(version: string) {
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)(.*)$/);
+  if (!match) return `${version}.1`;
+  return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+}
+
+async function nextAvailableProfileVersion(profileId: string, requestedVersion: string) {
+  let version = requestedVersion || "1.0.0";
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      await apiClient.getProfile(profileId, version);
+      version = bumpPatchVersion(version);
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : "";
+      if (message.includes("not found")) return version;
+      throw error;
+    }
+  }
+  return `${version}.${Date.now()}`;
+}
+
+function defaultTextFont(size = 12, weight: TextFont["weight"] = "normal"): TextFont {
+  return {
+    chinese: "SimSun",
+    latin: "Times New Roman",
+    size_pt: size,
+    weight,
+    color: "000000",
+  };
+}
+
+function withProfileDefaults(profile: FormatProfile): FormatProfile {
+  profile.schema_version = profile.schema_version || "2.0.0";
+  profile.body.space_before_pt ??= 0;
+  profile.body.space_after_pt ??= 0;
+  profile.headings = (profile.headings || []).map((heading) => ({
+    ...heading,
+    line_spacing: heading.line_spacing ?? null,
+    space_before_pt: heading.space_before_pt ?? 0,
+    space_after_pt: heading.space_after_pt ?? 0,
+    first_line_indent_chars: heading.first_line_indent_chars ?? 0,
+    keep_with_next: heading.keep_with_next ?? false,
+    page_break_before: heading.page_break_before ?? false,
+  }));
+  profile.table.caption.bilingual ??= false;
+  profile.table.caption.english_prefix ??= "Table";
+  profile.table.caption.separator ??= " ";
+  profile.table.caption.numbering ??= "chapter";
+  profile.table.border_style ??= "three_line";
+  profile.table.header_repeat ??= true;
+  profile.table.autofit ??= true;
+  profile.table.notes_position ??= "below";
+  profile.table.enforce_caption_above ??= true;
+  profile.figure.caption.bilingual ??= false;
+  profile.figure.caption.english_prefix ??= "Figure";
+  profile.figure.caption.separator ??= " ";
+  profile.figure.caption.numbering ??= "chapter";
+  profile.figure.placement ??= "inline";
+  profile.figure.half_column_max_mm ??= 60;
+  profile.figure.full_width_min_mm ??= 100;
+  profile.figure.full_width_max_mm ??= 130;
+  profile.figure.enforce_caption_below ??= true;
+  profile.header_footer.footer_text ??= null;
+  profile.header_footer.different_first_page ??= false;
+  profile.header_footer.different_odd_even ??= false;
+  profile.header_footer.page_number_format ??= "arabic";
+  profile.header_footer.page_number_start ??= 1;
+  profile.document_grid ??= {
+    enabled: false,
+    type: "none",
+    characters_per_line: null,
+    lines_per_page: null,
+    snap_to_grid: false,
+  };
+  profile.toc ??= {
+    enabled: true,
+    title: "目录",
+    include_levels: 3,
+    show_page_numbers: true,
+    right_align_page_numbers: true,
+    use_hyperlinks: true,
+    update_fields_on_open: true,
+  };
+  profile.list_numbering ??= {
+    ordered_pattern: "1.",
+    unordered_marker: "·",
+    multilevel_enabled: true,
+    restart_per_section: false,
+  };
+  profile.numbering ??= {
+    enabled: true,
+    heading_pattern: null,
+    restart_per_section: false,
+  };
+  profile.unit_rules ??= {
+    enforce_consistency: true,
+    measurement_units: ["mm", "cm", "m", "kg", "s"],
+    currency_units: ["元", "万元", "CNY", "USD"],
+    unit_spacing: "preserve",
+    use_si_symbols: true,
+    normalize_fullwidth_numbers: true,
+  };
+  profile.notes ??= {
+    font: defaultTextFont(9),
+    line_spacing: 1,
+    space_before_pt: 0,
+    space_after_pt: 0,
+  };
+  profile.notes.font ??= defaultTextFont(9);
+  profile.notes.line_spacing ??= 1;
+  profile.notes.space_before_pt ??= 0;
+  profile.notes.space_after_pt ??= 0;
+  profile.appendix ??= {
+    title_font: {
+      ...defaultTextFont(12, "bold"),
+      chinese: "SimHei",
+    },
+    body_font: defaultTextFont(12),
+    title_alignment: "left",
+    body_alignment: "justified",
+    body_line_spacing: 1.5,
+    body_first_line_indent_chars: 2,
+  };
+  profile.appendix.title_font ??= {
+    ...defaultTextFont(12, "bold"),
+    chinese: "SimHei",
+  };
+  profile.appendix.body_font ??= defaultTextFont(12);
+  profile.appendix.title_alignment ??= "left";
+  profile.appendix.body_alignment ??= "justified";
+  profile.appendix.body_line_spacing ??= 1.5;
+  profile.appendix.body_first_line_indent_chars ??= 2;
+  profile.source_documents ??= [];
+  profile.capability_coverage ??= [];
+  profile.manual_overrides ??= [];
+  profile.locked_fields ??= [];
+  profile.llm_final_review ??= {
+    enabled: true,
+    required: true,
+    check_garbled_text: true,
+    check_blank_pages: true,
+    check_overlap: true,
+    check_table_figure_overflow: true,
+  };
+  profile.delivery_gate.fail_on_unsupported_rules ??= true;
+  return profile;
+}
+
 function cloneProfile(profile: FormatProfile): FormatProfile {
-  return JSON.parse(JSON.stringify(profile)) as FormatProfile;
+  return withProfileDefaults(JSON.parse(JSON.stringify(profile)) as FormatProfile);
+}
+
+function profileNeedsV2Defaults(profile: FormatProfile): boolean {
+  return (
+    !profile.document_grid ||
+    !profile.toc ||
+    !profile.list_numbering ||
+    !profile.unit_rules ||
+    !profile.notes ||
+    !profile.appendix ||
+    !profile.table.border_style ||
+    !profile.figure.placement ||
+    profile.body.space_before_pt === undefined
+  );
+}
+
+function defaultHeading(profile: FormatProfile, level: number): FormatProfile["headings"][number] {
+  const sizeByLevel: Record<number, number> = { 1: 16, 2: 14, 3: 12 };
+  return {
+    level,
+    font: {
+      ...defaultTextFont(sizeByLevel[level] ?? profile.body.font.size_pt, "bold"),
+      chinese: profile.headings[0]?.font.chinese || "SimHei",
+      latin: profile.headings[0]?.font.latin || profile.body.font.latin,
+    },
+    alignment: level === 1 ? "center" : "left",
+    numbering: level === 1 ? "chapter" : "decimal",
+    line_spacing: profile.body.line_spacing,
+    space_before_pt: level === 1 ? 12 : 6,
+    space_after_pt: 6,
+    first_line_indent_chars: 0,
+    keep_with_next: true,
+    page_break_before: false,
+  };
+}
+
+function ensureHeading(profile: FormatProfile, level: number): FormatProfile["headings"][number] {
+  const existing = profile.headings.find((heading) => heading.level === level);
+  if (existing) return existing;
+  const created = defaultHeading(profile, level);
+  profile.headings.push(created);
+  profile.headings.sort((a, b) => a.level - b.level);
+  return created;
 }
 
 function colorInputValue(color?: string): string {
@@ -63,6 +247,45 @@ function colorInputValue(color?: string): string {
 
 function profileColorValue(color: string): string {
   return color.replace("#", "").toUpperCase();
+}
+
+function splitCsv(value: string): string[] {
+  return value
+    .split(/[,，、\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function collectChangedPaths(before: unknown, after: unknown, prefix = ""): string[] {
+  if (JSON.stringify(before) === JSON.stringify(after)) return [];
+  if (!isPlainObject(before) && !Array.isArray(before)) return prefix ? [prefix] : [];
+  if (!isPlainObject(after) && !Array.isArray(after)) return prefix ? [prefix] : [];
+  const beforeObject = before as Record<string, unknown> | unknown[];
+  const afterObject = after as Record<string, unknown> | unknown[];
+  const keys = new Set([...Object.keys(beforeObject), ...Object.keys(afterObject)]);
+  const paths: string[] = [];
+  keys.forEach((key) => {
+    const nextPrefix = Array.isArray(afterObject) || Array.isArray(beforeObject)
+      ? `${prefix}[${key}]`
+      : prefix
+        ? `${prefix}.${key}`
+        : key;
+    paths.push(...collectChangedPaths((beforeObject as Record<string, unknown>)[key], (afterObject as Record<string, unknown>)[key], nextPrefix));
+  });
+  return paths;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function markLockedCoverage(profile: FormatProfile, changedPaths: string[]) {
+  if (!changedPaths.length) return;
+  profile.locked_fields = Array.from(new Set([...(profile.locked_fields ?? []), ...changedPaths]));
+  profile.capability_coverage = (profile.capability_coverage ?? []).map((item) => ({
+    ...item,
+    locked_by_user: item.locked_by_user || profile.locked_fields.some((field) => field === item.field_path || field.startsWith(`${item.field_path}.`) || item.field_path.startsWith(`${field}.`)),
+  }));
 }
 
 function formatFileSize(bytes: number): string {
@@ -78,51 +301,139 @@ function formatFileSize(bytes: number): string {
 }
 
 function outputKind(file: FileRecord): string {
-  const lowerName = file.filename.toLowerCase();
-  if (
-    lowerName.endsWith(".docx") ||
-    file.mime_type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-  ) {
-    return "DOCX";
-  }
-  if (lowerName.endsWith(".pdf") || file.mime_type === "application/pdf") {
-    return "PDF";
-  }
+  const lower = file.filename.toLowerCase();
+  if (lower.endsWith(".pdf")) return "PDF";
+  if (lower.endsWith(".docx")) return "DOCX";
   return "FILE";
 }
 
-function deliveryStatusLabel(item: DeliveryManifestItem): string {
-  if (item.delivery_status === "completed") return item.fix_loop_ids.length > 0 ? "自动修复后合规" : "机器质检合规";
-  if (item.delivery_status === "manual_review_required") return "需要人工复核";
-  return "处理失败";
+function deliveryLabel(item: DeliveryManifestItem): string {
+  if (item.delivery_status === "completed") return "内部校验通过";
+  if (item.delivery_status === "manual_review_required") return "未放行";
+  return "失败";
 }
 
-function deliveryStatusDetail(item: DeliveryManifestItem): string {
-  if (item.delivery_status === "completed") {
-    return item.fix_loop_ids.length > 0
-      ? `已执行 ${item.fix_loop_ids.length} 轮安全修复，并通过最终质量报告。`
-      : "最终质量报告没有 warning、fail 或 unsupported 项。";
-  }
-  if (item.delivery_status === "manual_review_required") {
-    return "输出可下载，但存在系统无法自动确认的规则，不能声称完全合规。";
-  }
-  return "任务失败，请查看 job 状态或质量报告。";
+function gatePassed(summary: Record<string, unknown> | undefined): boolean {
+  const docx = summary?.docx;
+  return Boolean(docx && typeof docx === "object" && "passed" in docx && docx.passed === true);
+}
+
+function llmTone(status: LLMHealth | null | undefined): "ok" | "warn" | "bad" {
+  if (!status?.configured) return "bad";
+  if (status.reachable === true) return "ok";
+  if (status.status === "configured_unverified") return "warn";
+  return "bad";
+}
+
+function llmLabel(status: LLMHealth | null | undefined): string {
+  if (!status?.configured) return "missing";
+  if (status.reachable === true) return "reachable";
+  if (status.status === "configured_unverified") return "unverified";
+  return "failed";
+}
+
+function llmDetail(status: LLMHealth | null | undefined): string {
+  if (!status) return "LLM 状态未加载。";
+  if (!status.configured) return "未配置 LLM_API_KEY / LLM_MODEL。";
+  if (status.reachable === true) return `${status.model ?? "model"} 可生成内容。`;
+  if (status.status === "configured_unverified") return `${status.model ?? "model"} 已配置，尚未做真实生成检测。`;
+  return status.error_message || "LLM 已配置，但真实生成检测失败。";
+}
+
+type CapabilityCoverageItem = FormatProfile["capability_coverage"][number];
+
+function coverageStats(profile: FormatProfile | null) {
+  const items = profile?.capability_coverage ?? [];
+  const blocked = items.filter((item) => item.unsupported_behavior === "block" && (item.formatter === "unsupported" || item.qc === "unsupported"));
+  return {
+    total: items.length,
+    supported: items.filter((item) => item.formatter === "supported" && item.qc === "supported").length,
+    partial: items.filter((item) => item.formatter === "partial" || item.qc === "partial").length,
+    delegated: items.filter((item) => item.formatter === "template_delegated" || item.qc === "template_delegated").length,
+    unsupported: items.filter((item) => item.formatter === "unsupported" || item.qc === "unsupported").length,
+    blocked: blocked.length,
+    locked: items.filter((item) => item.locked_by_user).length,
+    evidence: profile?.rule_evidence?.length ?? 0,
+    missing: profile?.missing_fields?.length ?? 0,
+  };
+}
+
+function statusRank(item: CapabilityCoverageItem): number {
+  if (item.formatter === "unsupported" || item.qc === "unsupported") return 0;
+  if (item.formatter === "partial" || item.qc === "partial") return 1;
+  if (item.formatter === "template_delegated" || item.qc === "template_delegated") return 2;
+  return 3;
+}
+
+function filterCoverageItems(profile: FormatProfile | null, query: string, filter: CoverageFilter): CapabilityCoverageItem[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  const evidencePaths = new Set((profile?.rule_evidence ?? []).map((item) => item.field_path));
+  const missingPaths = new Set(profile?.missing_fields ?? []);
+  return [...(profile?.capability_coverage ?? [])]
+    .filter((item) => {
+      const tone = coverageTone(item);
+      if (filter === "supported" && tone !== "supported") return false;
+      if (filter === "partial" && tone !== "partial" && tone !== "delegated") return false;
+      if (filter === "unsupported" && tone !== "unsupported") return false;
+      if (filter === "locked" && !item.locked_by_user) return false;
+      if (filter === "missing" && !missingPaths.has(item.field_path)) return false;
+      if (filter === "evidence" && !evidencePaths.has(item.field_path)) return false;
+      if (!normalizedQuery) return true;
+      return [
+        item.field_path,
+        item.frontend,
+        item.agent,
+        item.formatter,
+        item.qc,
+        item.llm_final_review,
+        item.source,
+        item.note ?? "",
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedQuery);
+    })
+    .sort((a, b) => Number(b.locked_by_user) - Number(a.locked_by_user) || statusRank(a) - statusRank(b) || a.field_path.localeCompare(b.field_path));
+}
+
+function evidenceForField(profile: FormatProfile, fieldPath: string) {
+  return (profile.rule_evidence ?? []).filter((item) => item.field_path === fieldPath || item.field_path.startsWith(`${fieldPath}.`) || fieldPath.startsWith(`${item.field_path}.`));
+}
+
+function unsupportedForField(profile: FormatProfile, fieldPath: string) {
+  return (profile.unsupported_rules ?? []).filter((item) => item.field_path === fieldPath || item.field_path.startsWith(`${fieldPath}.`) || fieldPath.startsWith(`${item.field_path}.`));
+}
+
+function confidenceLabel(confidence: number): string {
+  return `${Math.round(confidence * 100)}%`;
+}
+
+function coverageTone(item: CapabilityCoverageItem): "supported" | "partial" | "delegated" | "unsupported" {
+  if (item.formatter === "unsupported" || item.qc === "unsupported") return "unsupported";
+  if (item.formatter === "partial" || item.qc === "partial") return "partial";
+  if (item.formatter === "template_delegated" || item.qc === "template_delegated") return "delegated";
+  return "supported";
+}
+
+function coverageLabel(item: CapabilityCoverageItem): string {
+  const tone = coverageTone(item);
+  if (tone === "supported") return "supported";
+  if (tone === "partial") return "partial";
+  if (tone === "delegated") return "template";
+  return item.unsupported_behavior === "block" ? "blocked" : "unsupported";
 }
 
 function App() {
   const [health, setHealth] = useState<ServiceHealth | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [llmHealth, setLlmHealth] = useState<LLMHealth | null>(null);
   const [profiles, setProfiles] = useState<ProfileSummary[]>([]);
   const [selectedProfileKey, setSelectedProfileKey] = useState<string | null>(null);
   const [selectedProfile, setSelectedProfile] = useState<FormatProfile | null>(null);
   const [profileDraft, setProfileDraft] = useState<FormatProfile | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
-  const [profileSaveError, setProfileSaveError] = useState<string | null>(null);
-  const [profileSaveMessage, setProfileSaveMessage] = useState<string | null>(null);
-  const [yamlText, setYamlText] = useState("");
-  const [yamlError, setYamlError] = useState<string | null>(null);
-  const [yamlMessage, setYamlMessage] = useState<string | null>(null);
-  const [intakeMode, setIntakeMode] = useState<"conversation" | "document">("conversation");
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [intakeMode, setIntakeMode] = useState<IntakeMode>("conversation");
   const [requirementText, setRequirementText] = useState("");
   const [requirementFollowUp, setRequirementFollowUp] = useState("");
   const [requirementSession, setRequirementSession] = useState<RequirementSession | null>(null);
@@ -130,51 +441,52 @@ function App() {
   const [confirmProfileName, setConfirmProfileName] = useState("");
   const [confirmProfileVersion, setConfirmProfileVersion] = useState("1.0.0");
   const [confirmProfileDescription, setConfirmProfileDescription] = useState("");
-  const [isLoadingProfiles, setIsLoadingProfiles] = useState(false);
-  const [isSavingProfile, setIsSavingProfile] = useState(false);
-  const [isImportingYaml, setIsImportingYaml] = useState(false);
-  const [isExportingYaml, setIsExportingYaml] = useState(false);
-  const [isCreatingRequirementSession, setIsCreatingRequirementSession] = useState(false);
-  const [isRefreshingRequirementSession, setIsRefreshingRequirementSession] = useState(false);
-  const [isSendingRequirementMessage, setIsSendingRequirementMessage] = useState(false);
-  const [isConfirmingRequirementSession, setIsConfirmingRequirementSession] = useState(false);
-  const [selectedRuleFile, setSelectedRuleFile] = useState<File | null>(null);
+  const [ruleFile, setRuleFile] = useState<File | null>(null);
+  const [ruleFileKind, setRuleFileKind] = useState<RequirementAttachmentSourceKind>("rule_document");
   const [ruleFileRecord, setRuleFileRecord] = useState<FileRecord | null>(null);
-  const [selectedInputFiles, setSelectedInputFiles] = useState<File[]>([]);
+  const [templateFile, setTemplateFile] = useState<File | null>(null);
+  const [templateFileRecord, setTemplateFileRecord] = useState<FileRecord | null>(null);
+  const [inputFiles, setInputFiles] = useState<File[]>([]);
   const [inputFileRecords, setInputFileRecords] = useState<FileRecord[]>([]);
-  const [batchRun, setBatchRun] = useState<BatchFormatRun | null>(null);
   const [job, setJob] = useState<JobRecord | null>(null);
+  const [batchRun, setBatchRun] = useState<BatchFormatRun | null>(null);
   const [outputFiles, setOutputFiles] = useState<FileRecord[]>([]);
   const [outputError, setOutputError] = useState<string | null>(null);
-  const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
-  const [qualityError, setQualityError] = useState<string | null>(null);
-  const [fixPlan, setFixPlan] = useState<FixPlan | null>(null);
-  const [fixLoop, setFixLoop] = useState<FixLoopRecord | null>(null);
-  const [fixPlanError, setFixPlanError] = useState<string | null>(null);
-  const [selectedFixIssueIds, setSelectedFixIssueIds] = useState<string[]>([]);
-  const [ruleUploadError, setRuleUploadError] = useState<string | null>(null);
-  const [inputUploadError, setInputUploadError] = useState<string | null>(null);
-  const [jobError, setJobError] = useState<string | null>(null);
-  const [isUploadingRuleFile, setIsUploadingRuleFile] = useState(false);
-  const [isUploadingInputFile, setIsUploadingInputFile] = useState(false);
-  const [isCreatingJob, setIsCreatingJob] = useState(false);
-  const [isCreatingBatch, setIsCreatingBatch] = useState(false);
-  const [isRefreshingBatch, setIsRefreshingBatch] = useState(false);
-  const [isRefreshingJob, setIsRefreshingJob] = useState(false);
-  const [isLoadingOutputs, setIsLoadingOutputs] = useState(false);
-  const [isCreatingQualityReport, setIsCreatingQualityReport] = useState(false);
-  const [isRefreshingQualityReport, setIsRefreshingQualityReport] = useState(false);
-  const [isCreatingFixPlan, setIsCreatingFixPlan] = useState(false);
-  const [isConfirmingFixLoop, setIsConfirmingFixLoop] = useState(false);
-  const [isExecutingFixLoop, setIsExecutingFixLoop] = useState(false);
-  const outputFileIdsKey = job?.output_file_ids.join("|") ?? "";
+  const [outputFormats, setOutputFormats] = useState<Record<OutputFormat, boolean>>({ docx: true, pdf: false });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [ruleSearch, setRuleSearch] = useState("");
+  const [coverageFilter, setCoverageFilter] = useState<CoverageFilter>("all");
+
+  const selectedProfileRef = useMemo(() => {
+    if (!selectedProfile) return null;
+    return { profile_id: selectedProfile.id, profile_version: selectedProfile.version };
+  }, [selectedProfile]);
+
+  const selectedOutputFormats = useMemo(
+    () => (Object.entries(outputFormats).filter(([, enabled]) => enabled).map(([format]) => format) as OutputFormat[]),
+    [outputFormats],
+  );
+  const stats = useMemo(() => coverageStats(profileDraft), [profileDraft]);
+  const visibleCoverageItems = useMemo(
+    () => filterCoverageItems(profileDraft, ruleSearch, coverageFilter),
+    [profileDraft, ruleSearch, coverageFilter],
+  );
+  const activeLlmHealth = llmHealth ?? health?.services.llm_status ?? null;
+
+  useEffect(() => {
+    if (profileDraft && profileNeedsV2Defaults(profileDraft)) {
+      setProfileDraft(cloneProfile(profileDraft));
+    }
+  }, [profileDraft]);
 
   useEffect(() => {
     apiClient
       .getHealth()
       .then((payload) => {
         setHealth(payload);
+        setLlmHealth(payload.services.llm_status);
         setHealthError(null);
+        if (payload.services.soffice_configured) setOutputFormats({ docx: true, pdf: true });
       })
       .catch((error: Error) => {
         setHealth(null);
@@ -182,19 +494,18 @@ function App() {
       });
   }, []);
 
-  const loadProfiles = async (nextSelectedKey?: string) => {
-    setIsLoadingProfiles(true);
+  const loadProfiles = async (nextKey?: string) => {
+    setBusy("profiles");
     try {
       const summaries = await apiClient.listProfiles();
       setProfiles(summaries);
       setProfileError(null);
-      if (nextSelectedKey) {
-        setSelectedProfileKey(nextSelectedKey);
-      }
+      const preferred = nextKey ?? selectedProfileKey ?? (summaries[0] ? profileKey(summaries[0].profile_id, summaries[0].current_version) : null);
+      if (preferred) setSelectedProfileKey(preferred);
     } catch (error) {
       setProfileError(error instanceof Error ? error.message : "Profile 加载失败。");
     } finally {
-      setIsLoadingProfiles(false);
+      setBusy(null);
     }
   };
 
@@ -214,10 +525,10 @@ function App() {
       .then((profile) => {
         setSelectedProfile(profile);
         setProfileDraft(cloneProfile(profile));
+        setConfirmProfileName(profile.name);
+        setConfirmProfileVersion(profile.version);
+        setConfirmProfileDescription(profile.description || "");
         setProfileError(null);
-        setProfileSaveError(null);
-        setProfileSaveMessage(null);
-        setYamlError(null);
       })
       .catch((error: Error) => {
         setSelectedProfile(null);
@@ -227,1665 +538,1719 @@ function App() {
   }, [selectedProfileKey]);
 
   useEffect(() => {
-    const outputIds = job?.output_file_ids ?? [];
-    if (outputIds.length === 0) {
+    const ids = job?.output_file_ids ?? [];
+    if (ids.length === 0) {
       setOutputFiles([]);
-      setOutputError(null);
-      setIsLoadingOutputs(false);
       return;
     }
-
     let cancelled = false;
-    setIsLoadingOutputs(true);
-    setOutputError(null);
-    void Promise.allSettled(outputIds.map((fileId) => apiClient.getFile(fileId))).then((results) => {
+    void Promise.allSettled(ids.map((id) => apiClient.getFile(id))).then((results) => {
       if (cancelled) return;
-      const loadedFiles: FileRecord[] = [];
-      const failedIds: string[] = [];
+      const loaded: FileRecord[] = [];
+      const failed: string[] = [];
       results.forEach((result, index) => {
-        if (result.status === "fulfilled") loadedFiles.push(result.value);
-        else failedIds.push(outputIds[index]);
+        if (result.status === "fulfilled") loaded.push(result.value);
+        else failed.push(ids[index]);
       });
-      setOutputFiles(loadedFiles);
-      setOutputError(failedIds.length > 0 ? `部分输出元数据加载失败：${failedIds.join(", ")}` : null);
-      setIsLoadingOutputs(false);
+      setOutputFiles(loaded);
+      setOutputError(failed.length ? `输出元数据加载失败：${failed.join(", ")}` : null);
     });
-
     return () => {
       cancelled = true;
     };
-  }, [outputFileIdsKey, job]);
+  }, [job?.output_file_ids]);
 
-  const updateProfileDraft = (mutator: (draft: FormatProfile) => void) => {
+  const updateDraft = (mutator: (draft: FormatProfile) => void) => {
     setProfileDraft((current) => {
       if (!current) return current;
+      const before = cloneProfile(current);
       const next = cloneProfile(current);
       mutator(next);
+      next.schema_version = "2.0.0";
+      markLockedCoverage(next, collectChangedPaths(before, next));
       return next;
     });
-    setProfileSaveError(null);
-    setProfileSaveMessage(null);
+    setProfileMessage(null);
   };
 
-  const createDraftFromSelected = () => {
+  const createVisualDraft = () => {
     const source = selectedProfile ?? profileDraft;
     if (!source) {
-      setProfileSaveError("请先选择一个 profile。");
+      setProfileError("请先选择一个 Profile 作为起点。");
       return;
     }
-    const next = cloneProfile(source);
-    next.id = `draft_${Date.now()}`;
-    next.name = `${source.name} Draft`;
-    next.version = "0.1.0";
-    next.status = "draft";
-    next.source = "user";
+    const draft = cloneProfile(source);
+    draft.id = `profile_${Date.now()}`;
+    draft.name = `${source.name} Copy`;
+    draft.version = "0.1.0";
+    draft.status = "draft";
+    draft.source = "user";
+    draft.schema_version = "2.0.0";
+    draft.rule_evidence = [];
+    draft.missing_fields = [];
+    draft.unsupported_rules = [];
     setSelectedProfileKey(null);
     setSelectedProfile(null);
-    setProfileDraft(next);
-    setProfileSaveError(null);
-    setProfileSaveMessage("已创建本地 draft，保存后会写入后端。");
+    setProfileDraft(draft);
+    setConfirmProfileName(draft.name);
+    setConfirmProfileVersion(draft.version);
+    setConfirmProfileDescription(draft.description || "");
+    setIntakeMode("visual");
+    setProfileMessage("已创建可视化 Profile 草案。");
   };
 
-  const loadRequirementDraft = () => {
-    if (!requirementSession?.profile_draft) {
-      setRequirementError("没有可载入的 profile draft。");
-      return;
-    }
-    const next = cloneProfile(requirementSession.profile_draft);
-    next.status = "draft";
-    next.source = "imported";
-    setSelectedProfileKey(null);
-    setSelectedProfile(null);
-    setProfileDraft(next);
-    setConfirmProfileName(next.name);
-    setConfirmProfileVersion(next.version);
-    setConfirmProfileDescription(next.description || "");
-    setProfileSaveError(null);
-    setProfileSaveMessage("已载入 Agent profile draft，确认后可保存为 draft 或 active。");
-  };
-
-  const saveProfileDraft = async () => {
-    if (!profileDraft) {
-      setProfileSaveError("没有可保存的 profile draft。");
-      return;
-    }
-    setIsSavingProfile(true);
-    setProfileSaveError(null);
-    setProfileSaveMessage(null);
-    try {
-      const exists = profiles.some((profile) => profile.profile_id === profileDraft.id);
-      const saved = exists ? await apiClient.saveProfileVersion(profileDraft) : await apiClient.saveProfile(profileDraft);
-      const key = profileKey(saved.id, saved.version);
-      setSelectedProfile(saved);
-      setProfileDraft(cloneProfile(saved));
-      setProfileSaveMessage(`已保存 ${saved.name} v${saved.version}`);
-      await loadProfiles(key);
-    } catch (error) {
-      setProfileSaveError(error instanceof Error ? error.message : "保存 profile 失败。");
-    } finally {
-      setIsSavingProfile(false);
-    }
-  };
-
-  const importYaml = async () => {
-    if (!yamlText.trim()) {
-      setYamlError("请先粘贴 profile YAML。");
-      return;
-    }
-    setIsImportingYaml(true);
-    setYamlError(null);
-    setYamlMessage(null);
-    try {
-      const imported = await apiClient.importProfileYaml(yamlText);
-      setProfileDraft(cloneProfile(imported));
-      setSelectedProfile(imported);
-      setYamlMessage(`已导入 ${imported.name} v${imported.version}`);
-      await loadProfiles(profileKey(imported.id, imported.version));
-    } catch (error) {
-      setYamlError(error instanceof Error ? error.message : "导入 YAML 失败。");
-    } finally {
-      setIsImportingYaml(false);
-    }
-  };
-
-  const exportYaml = async () => {
-    const source = profileDraft ?? selectedProfile;
-    if (!source) {
-      setYamlError("请先选择一个 profile。");
-      return;
-    }
-    setIsExportingYaml(true);
-    setYamlError(null);
-    setYamlMessage(null);
-    try {
-      const exported = await apiClient.exportProfileYaml(source.id, source.version);
-      setYamlText(exported);
-      setYamlMessage(`已导出 ${source.name} v${source.version}`);
-    } catch (error) {
-      setYamlError(error instanceof Error ? error.message : "导出 YAML 失败。");
-    } finally {
-      setIsExportingYaml(false);
-    }
-  };
-
-  const uploadWordFile = async (
-    file: File | null,
-    setRecord: (record: FileRecord | null) => void,
-    setError: (message: string | null) => void,
-    setLoading: (loading: boolean) => void,
-  ) => {
-    if (!file) {
-      setError("请先选择 .doc 或 .docx 文件。");
-      return null;
-    }
-    const lowerName = file.name.toLowerCase();
-    if (!lowerName.endsWith(".doc") && !lowerName.endsWith(".docx")) {
-      setError("仅支持 .doc 和 .docx 文件。");
-      setRecord(null);
-      return null;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const record = await apiClient.uploadFile(file);
-      setRecord(record);
-      return record;
-    } catch (error) {
-      setRecord(null);
-      setError(error instanceof Error ? error.message : "上传失败。");
-      return null;
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const uploadRuleFile = async (event: FormEvent<HTMLFormElement>) => {
+  const createRequirementSession = async (event: FormEvent) => {
     event.preventDefault();
-    const uploaded = await uploadWordFile(selectedRuleFile, setRuleFileRecord, setRuleUploadError, setIsUploadingRuleFile);
-    if (uploaded) {
-      setIntakeMode("document");
-      setRequirementSession(null);
-      setRequirementError(null);
-      setSelectedProfileKey(null);
-      setSelectedProfile(null);
-      setProfileDraft(null);
-      await createRequirementSession({ source_type: "document", file_id: uploaded.file_id });
-    }
-  };
-
-  const uploadInputFile = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (selectedInputFiles.length === 0) {
-      setInputUploadError("请先选择至少一个 .doc 或 .docx 文件。");
-      return;
-    }
-    const invalid = selectedInputFiles.find((file) => {
-      const lowerName = file.name.toLowerCase();
-      return !lowerName.endsWith(".doc") && !lowerName.endsWith(".docx");
-    });
-    if (invalid) {
-      setInputUploadError(`仅支持 .doc 和 .docx 文件：${invalid.name}`);
-      return;
-    }
-    setIsUploadingInputFile(true);
-    setInputUploadError(null);
-    try {
-      setInputFileRecords(await Promise.all(selectedInputFiles.map((file) => apiClient.uploadFile(file))));
-    } catch (error) {
-      setInputFileRecords([]);
-      setInputUploadError(error instanceof Error ? error.message : "上传失败。");
-      return;
-    } finally {
-      setIsUploadingInputFile(false);
-    }
-    setJob(null);
-    setBatchRun(null);
-    setOutputFiles([]);
-    setOutputError(null);
-    setQualityReport(null);
-    setQualityError(null);
-    setFixPlan(null);
-    setFixLoop(null);
-    setFixPlanError(null);
-    setSelectedFixIssueIds([]);
-    setJobError(null);
-  };
-
-  const createRequirementSession = async (
-    overridePayload?: { source_type: "document"; file_id: string } | { source_type: "conversation"; natural_language: string },
-  ) => {
-    setIsCreatingRequirementSession(true);
+    setBusy("requirement");
     setRequirementError(null);
-    setRequirementSession(null);
-    setSelectedProfileKey(null);
-    setSelectedProfile(null);
-    setProfileDraft(null);
-    setProfileSaveMessage(null);
-    setProfileSaveError(null);
+    setProfileMessage(null);
     try {
-      const created = await apiClient.createRequirementSession(
-        overridePayload ??
-          (intakeMode === "document"
-            ? { source_type: "document", file_id: ruleFileRecord?.file_id ?? null }
-            : { source_type: "conversation", natural_language: requirementText }),
-      );
-      setRequirementSession(created);
-      if (created.profile_draft) {
-        setConfirmProfileName(created.profile_draft.name);
-        setConfirmProfileVersion("1.0.0");
-        setConfirmProfileDescription(created.profile_draft.description || "");
-      }
+      const session = await apiClient.createRequirementSession({
+        source_type: "conversation",
+        natural_language: requirementText,
+        current_profile: profileDraft,
+        locked_fields: profileDraft?.locked_fields ?? [],
+      });
+      applyRequirementSession(session);
     } catch (error) {
-      setRequirementError(error instanceof Error ? error.message : "创建需求会话失败。");
+      setRequirementError(error instanceof Error ? error.message : "Agent 分析失败。");
     } finally {
-      setIsCreatingRequirementSession(false);
+      setBusy(null);
     }
   };
 
-  const refreshRequirementSession = async () => {
-    if (!requirementSession) return;
-    setIsRefreshingRequirementSession(true);
+  const uploadRuleAndAnalyze = async () => {
+    if (!ruleFile) return;
+    setBusy("rule-file");
     setRequirementError(null);
     try {
-      setRequirementSession(await apiClient.getRequirementSession(requirementSession.session_id));
+      const uploaded = await apiClient.uploadFile(ruleFile);
+      setRuleFileRecord(uploaded);
+      const session = await apiClient.createRequirementSession({
+        source_type: "conversation",
+        natural_language: requirementText || `请分析上传的${ruleFileKind === "style_sample_docx" ? "格式样本文档" : "格式规则文档"}，总结完整格式 JSON。`,
+        attachments: [{ file_id: uploaded.file_id, source_kind: ruleFileKind, filename: uploaded.filename }],
+        current_profile: profileDraft,
+        locked_fields: profileDraft?.locked_fields ?? [],
+      });
+      applyRequirementSession(session);
     } catch (error) {
-      setRequirementError(error instanceof Error ? error.message : "刷新需求会话失败。");
+      setRequirementError(error instanceof Error ? error.message : "格式文档分析失败。");
     } finally {
-      setIsRefreshingRequirementSession(false);
+      setBusy(null);
     }
   };
 
   const sendRequirementMessage = async () => {
-    if (!requirementSession) {
-      setRequirementError("请先启动需求会话。");
-      return;
-    }
-    if (!requirementFollowUp.trim()) {
-      setRequirementError("请先填写要补充的格式信息。");
-      return;
-    }
-    setIsSendingRequirementMessage(true);
+    if (!requirementSession || !requirementFollowUp.trim()) return;
+    setBusy("requirement-message");
     setRequirementError(null);
     try {
-      const updated = await apiClient.addRequirementMessage(requirementSession.session_id, requirementFollowUp);
-      setRequirementSession(updated);
+      const session = await apiClient.addRequirementMessage(requirementSession.session_id, requirementFollowUp, {
+        current_profile: profileDraft,
+        locked_fields: profileDraft?.locked_fields ?? [],
+      });
       setRequirementFollowUp("");
-      if (updated.profile_draft) {
-        setConfirmProfileName(updated.profile_draft.name);
-        setConfirmProfileVersion(confirmProfileVersion || "1.0.0");
-        setConfirmProfileDescription(updated.profile_draft.description || "");
-      }
+      applyRequirementSession(session);
     } catch (error) {
-      setRequirementError(error instanceof Error ? error.message : "提交补充信息失败。");
+      setRequirementError(error instanceof Error ? error.message : "补充规则失败。");
     } finally {
-      setIsSendingRequirementMessage(false);
+      setBusy(null);
+    }
+  };
+
+  const applyRequirementSession = (session: RequirementSession) => {
+    setRequirementSession(session);
+    if (session.profile_draft) {
+      setProfileDraft(cloneProfile(session.profile_draft));
+      setConfirmProfileName(session.profile_draft.name);
+      setConfirmProfileVersion(session.profile_draft.version);
+      setConfirmProfileDescription(session.profile_draft.description || "");
     }
   };
 
   const confirmRequirementProfile = async () => {
-    if (!requirementSession) {
-      setRequirementError("请先启动需求会话。");
-      return;
-    }
-    setIsConfirmingRequirementSession(true);
+    if (!requirementSession) return;
+    setBusy("confirm-profile");
     setRequirementError(null);
     try {
-      const confirmed = await apiClient.confirmRequirementSession(requirementSession.session_id, {
+      const session = await apiClient.confirmRequirementSession(requirementSession.session_id, {
         profile_name: confirmProfileName,
         profile_version: confirmProfileVersion,
         profile_description: confirmProfileDescription || null,
       });
-      setRequirementSession(confirmed);
-      if (confirmed.profile_draft) {
-        const key = profileKey(confirmed.profile_draft.id, confirmed.profile_draft.version);
-        setSelectedProfile(confirmed.profile_draft);
-        setSelectedProfileKey(key);
-        setProfileDraft(cloneProfile(confirmed.profile_draft));
-        setProfileSaveMessage(`已保存并选中 ${confirmed.profile_draft.name} v${confirmed.profile_draft.version}`);
-        await loadProfiles(key);
+      applyRequirementSession(session);
+      const saved = session.profile_draft;
+      if (saved) {
+        setProfileMessage(`已保存 ${saved.name} v${saved.version}`);
+        await loadProfiles(profileKey(saved.id, saved.version));
       }
     } catch (error) {
-      setRequirementError(error instanceof Error ? error.message : "确认 Profile 失败。");
+      setRequirementError(error instanceof Error ? error.message : "Profile 保存失败。");
     } finally {
-      setIsConfirmingRequirementSession(false);
+      setBusy(null);
+    }
+  };
+
+  const saveVisualProfile = async () => {
+    if (!profileDraft) return;
+    setBusy("save-profile");
+    setProfileError(null);
+    try {
+      const draft = cloneProfile(profileDraft);
+      draft.name = confirmProfileName || draft.name;
+      draft.version = confirmProfileVersion || draft.version;
+      draft.description = confirmProfileDescription || draft.description;
+      draft.status = "active";
+      draft.source = "user";
+      draft.schema_version = "2.0.0";
+      draft.version = await nextAvailableProfileVersion(draft.id, draft.version);
+      const exists = profiles.some((profile) => profile.profile_id === draft.id);
+      const saved = exists ? await apiClient.saveProfileVersion(draft) : await apiClient.saveProfile(draft);
+      setProfileMessage(`已保存 ${saved.name} v${saved.version}`);
+      await loadProfiles(profileKey(saved.id, saved.version));
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "Profile 保存失败。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const uploadTemplate = async () => {
+    if (!templateFile) return;
+    setBusy("template");
+    try {
+      const uploaded = await apiClient.uploadFile(templateFile);
+      setTemplateFileRecord(uploaded);
+      if (profileDraft) {
+        updateDraft((draft) => {
+          draft.template_binding.template_file_id = uploaded.file_id;
+          draft.template_binding.template_name = uploaded.filename;
+        });
+      }
+    } catch (error) {
+      setOutputError(error instanceof Error ? error.message : "模板上传失败。");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const uploadInputs = async () => {
+    if (inputFiles.length === 0) return;
+    setBusy("inputs");
+    setOutputError(null);
+    try {
+      const uploaded = await Promise.all(inputFiles.map((file) => apiClient.uploadFile(file)));
+      setInputFileRecords(uploaded);
+      setJob(null);
+      setBatchRun(null);
+      setOutputFiles([]);
+    } catch (error) {
+      setOutputError(error instanceof Error ? error.message : "待处理文档上传失败。");
+    } finally {
+      setBusy(null);
     }
   };
 
   const createJob = async () => {
-    const firstInput = inputFileRecords[0];
-    if (!firstInput) {
-      setJobError("请先上传 Word 文件。");
-      return;
-    }
-    setIsCreatingJob(true);
-    setJobError(null);
+    if (!selectedProfileRef || inputFileRecords.length === 0 || selectedOutputFormats.length === 0) return;
+    setBusy("job");
+    setOutputError(null);
     try {
-      const profileRef =
-        selectedProfile && selectedProfileKey
-          ? { profile_id: selectedProfile.id, profile_version: selectedProfile.version }
-          : undefined;
-      const created = await apiClient.createJob(firstInput.file_id, profileRef);
+      const created = await apiClient.createJob(inputFileRecords[0].file_id, selectedProfileRef, {
+        template_file_id: templateFileRecord?.file_id ?? null,
+        output_formats: selectedOutputFormats,
+      });
       setJob(created);
       setBatchRun(null);
-      setOutputFiles([]);
-      setOutputError(null);
-      setQualityReport(null);
-      setQualityError(null);
-      setFixPlan(null);
-      setFixLoop(null);
-      setFixPlanError(null);
-      setSelectedFixIssueIds([]);
     } catch (error) {
-      setJobError(error instanceof Error ? error.message : "创建任务失败。");
+      setOutputError(error instanceof Error ? error.message : "导出任务创建失败。");
     } finally {
-      setIsCreatingJob(false);
+      setBusy(null);
+    }
+  };
+
+  const createBatch = async () => {
+    if (!selectedProfileRef || inputFileRecords.length === 0 || selectedOutputFormats.length === 0) return;
+    setBusy("batch");
+    setOutputError(null);
+    try {
+      const created = await apiClient.createBatch({
+        ...selectedProfileRef,
+        template_file_id: templateFileRecord?.file_id ?? null,
+        input_file_ids: inputFileRecords.map((file) => file.file_id),
+        output_formats: selectedOutputFormats,
+        auto_quality: true,
+        auto_fix: true,
+      });
+      setBatchRun(created);
+      setJob(null);
+      setOutputFiles([]);
+    } catch (error) {
+      setOutputError(error instanceof Error ? error.message : "批量导出失败。");
+    } finally {
+      setBusy(null);
     }
   };
 
   const refreshJob = async () => {
     if (!job) return;
-    setIsRefreshingJob(true);
-    setJobError(null);
+    setBusy("refresh-job");
     try {
       setJob(await apiClient.getJob(job.job_id));
-    } catch (error) {
-      setJobError(error instanceof Error ? error.message : "刷新任务失败。");
     } finally {
-      setIsRefreshingJob(false);
-    }
-  };
-
-  const createBatch = async () => {
-    if (inputFileRecords.length === 0) {
-      setJobError("请先上传至少一个 Word 文件。");
-      return;
-    }
-    if (!selectedProfile) {
-      setJobError("请先选择 Profile。");
-      return;
-    }
-    setIsCreatingBatch(true);
-    setJobError(null);
-    try {
-      const created = await apiClient.createBatch({
-        profile_id: selectedProfile.id,
-        profile_version: selectedProfile.version,
-        input_file_ids: inputFileRecords.map((record) => record.file_id),
-        output_formats: ["docx", "pdf"],
-        auto_quality: true,
-        auto_fix: true,
-      });
-      setBatchRun(created);
-      const firstJobId = created.job_ids[0];
-      if (firstJobId) {
-        setJob(await apiClient.getJob(firstJobId));
-      }
-      setOutputFiles([]);
-      setOutputError(null);
-      setQualityReport(null);
-      setQualityError(null);
-      setFixPlan(null);
-      setFixLoop(null);
-      setFixPlanError(null);
-      setSelectedFixIssueIds([]);
-    } catch (error) {
-      setJobError(error instanceof Error ? error.message : "创建批量任务失败。");
-    } finally {
-      setIsCreatingBatch(false);
+      setBusy(null);
     }
   };
 
   const refreshBatch = async () => {
     if (!batchRun) return;
-    setIsRefreshingBatch(true);
-    setJobError(null);
+    setBusy("refresh-batch");
     try {
       setBatchRun(await apiClient.getBatch(batchRun.batch_id));
-    } catch (error) {
-      setJobError(error instanceof Error ? error.message : "刷新批量任务失败。");
     } finally {
-      setIsRefreshingBatch(false);
+      setBusy(null);
     }
   };
 
-  const createQualityReport = async () => {
-    if (!job?.profile_id || !job.profile_version) {
-      setQualityError("当前任务缺少 profile 引用，无法生成质量报告。");
-      return;
-    }
-    if (job.output_file_ids.length === 0) {
-      setQualityError("当前任务还没有输出文件，无法生成质量报告。");
-      return;
-    }
-
-    setIsCreatingQualityReport(true);
-    setQualityError(null);
+  const checkLlmHealth = async () => {
+    setBusy("llm-health");
+    setHealthError(null);
     try {
-      const report = await apiClient.createQualityReport({
-        profile_id: job.profile_id,
-        profile_version: job.profile_version,
-        output_file_ids: job.output_file_ids,
-        job_id: job.job_id,
-      });
-      setQualityReport(report);
-      setFixPlan(null);
-      setFixLoop(null);
-      setFixPlanError(null);
-      setSelectedFixIssueIds([]);
+      setLlmHealth(await apiClient.getLlmHealth());
     } catch (error) {
-      setQualityError(error instanceof Error ? error.message : "质量报告生成失败。");
+      setHealthError(error instanceof Error ? error.message : "LLM 检测失败。");
     } finally {
-      setIsCreatingQualityReport(false);
+      setBusy(null);
     }
   };
-
-  const refreshQualityReport = async () => {
-    if (!qualityReport) return;
-    setIsRefreshingQualityReport(true);
-    setQualityError(null);
-    try {
-      setQualityReport(await apiClient.getQualityReport(qualityReport.report_id));
-    } catch (error) {
-      setQualityError(error instanceof Error ? error.message : "质量报告刷新失败。");
-    } finally {
-      setIsRefreshingQualityReport(false);
-    }
-  };
-
-  const createFixPlan = async () => {
-    if (!qualityReport) {
-      setFixPlanError("请先生成质量报告。");
-      return;
-    }
-    setIsCreatingFixPlan(true);
-    setFixPlanError(null);
-    setFixLoop(null);
-    setSelectedFixIssueIds([]);
-    try {
-      setFixPlan(await apiClient.createFixPlan(qualityReport.report_id));
-    } catch (error) {
-      setFixPlanError(error instanceof Error ? error.message : "修复计划生成失败。");
-    } finally {
-      setIsCreatingFixPlan(false);
-    }
-  };
-
-  const toggleSelectedFixIssue = (issueId: string) => {
-    setSelectedFixIssueIds((current) =>
-      current.includes(issueId) ? current.filter((item) => item !== issueId) : [...current, issueId],
-    );
-    setFixPlanError(null);
-  };
-
-  const selectAllFixableIssues = () => {
-    if (!fixPlan) return;
-    setSelectedFixIssueIds(Array.from(new Set(fixPlan.actions.flatMap((action) => action.target_issue_ids))));
-    setFixPlanError(null);
-  };
-
-  const confirmFixLoop = async () => {
-    if (!qualityReport || !fixPlan) {
-      setFixPlanError("请先生成质量报告和修复计划。");
-      return;
-    }
-    if (selectedFixIssueIds.length === 0) {
-      setFixPlanError("请先选择至少一个可自动修复的问题。");
-      return;
-    }
-    setIsConfirmingFixLoop(true);
-    setIsExecutingFixLoop(false);
-    setFixPlanError(null);
-    try {
-      const confirmed = await apiClient.confirmFixLoop(qualityReport.report_id, {
-        fix_plan_id: fixPlan.fix_plan_id,
-        selected_issue_ids: selectedFixIssueIds,
-      });
-      setFixLoop(confirmed);
-      setIsExecutingFixLoop(true);
-      const executed = await apiClient.executeFixLoop(qualityReport.report_id, confirmed.fix_loop_id);
-      setFixLoop(executed);
-      if (executed.new_job_id) {
-        setJob(await apiClient.getJob(executed.new_job_id));
-      }
-      if (executed.updated_report_id) {
-        setQualityReport(await apiClient.getQualityReport(executed.updated_report_id));
-        setFixPlan(null);
-        setSelectedFixIssueIds([]);
-      }
-      if (executed.status === "failed") {
-        setFixPlanError(executed.error_message || "修复执行失败。");
-      }
-    } catch (error) {
-      setFixPlanError(error instanceof Error ? error.message : "执行修复计划失败。");
-    } finally {
-      setIsConfirmingFixLoop(false);
-      setIsExecutingFixLoop(false);
-    }
-  };
-
-  const selectedProfileSummary = profiles.find((item) => profileKey(item.profile_id, item.current_version) === selectedProfileKey);
-  const qualityReportReady = Boolean(job?.profile_id && job.profile_version && job.output_file_ids.length > 0);
-  const qualityRemainingCount = qualityReport?.summary.remaining_issue_count ?? 0;
-  const fixableIssueIds = fixPlan ? Array.from(new Set(fixPlan.actions.flatMap((action) => action.target_issue_ids))) : [];
-  const qualityVerdict =
-    qualityReport && qualityRemainingCount === 0 && qualityReport.summary.all_compliant
-      ? "全部合规"
-      : qualityReport
-        ? `仍有 ${qualityRemainingCount} 项待处理`
-        : "待生成质量报告";
-  const manualReviewIssues =
-    qualityReport?.issues.filter((issue) => issue.status === "warning" || issue.status === "fail" || issue.status === "unsupported") ?? [];
-  const boundaryIssues =
-    qualityReport?.issues.filter((issue) =>
-      [
-        "docx.toc.fields",
-        "docx.notes",
-        "docx.visuals.caption_pairing",
-        "docx.fields.update_policy",
-        "pdf.text_extractability",
-        "pdf.blank_pages",
-      ].includes(issue.check_key),
-    ) ?? [];
-  const readinessItems = [
-    {
-      label: "LLM Agent",
-      ok: Boolean(health?.services.llm_configured),
-      detail: health?.services.llm_configured ? "可读取对话/格式文档" : "未配置时会停止分析",
-    },
-    {
-      label: "Profile",
-      ok: Boolean(selectedProfile),
-      detail: selectedProfile
-        ? `${selectedProfile.name} v${selectedProfile.version}`
-        : requirementSession?.profile_draft
-          ? "已有草案，仍需确认保存"
-          : "等待 Agent 生成或手动选择",
-    },
-    {
-      label: "Word 输入",
-      ok: inputFileRecords.length > 0,
-      detail: inputFileRecords.length > 0 ? `${inputFileRecords.length} 份文档已上传` : "等待上传 .doc/.docx",
-    },
-    {
-      label: "导出质检",
-      ok: Boolean(qualityReport?.summary.all_compliant),
-      detail: qualityReport
-        ? qualityReport.summary.all_compliant
-          ? "质量报告已通过"
-          : `${qualityReport.summary.remaining_issue_count} 项待处理`
-        : batchRun
-          ? "已导出，等待查看报告"
-          : "等待导出后生成报告",
-    },
-  ];
 
   return (
     <main className="app-shell">
-      <header className="app-header">
+      <aside className="side-rail" aria-label="Perfect DOCX">
         <div className="brand-lockup">
-          <LayoutDashboard size={22} aria-hidden="true" />
-          <span>Word Format Agent</span>
-        </div>
-        <div className={`service-pill ${health ? "ok" : "warn"}`} aria-live="polite">
-          {health ? <CheckCircle2 size={16} aria-hidden="true" /> : <AlertTriangle size={16} aria-hidden="true" />}
-          <span>
-            {health
-              ? `${health.app_name} · LLM ${health.services.llm_configured ? "已配置" : "未配置"} · PDF ${
-                  health.services.soffice_configured ? "可导出" : "未配置"
-                }`
-              : healthError || "正在连接后端"}
-          </span>
-        </div>
-      </header>
-
-      <section className="workspace-title">
-        <p className="eyebrow">Production workflow</p>
-        <h1>一键按自定义规则输出 Word / PDF</h1>
-        <p>先由 Agent 读懂格式要求并沉淀为 Profile，再用这套 Profile 处理你的报告，最后下载规范化文件和质量报告。</p>
-      </section>
-
-      <section className="readiness-strip" aria-label="运行准备状态">
-        {readinessItems.map((item) => (
-          <article className={`readiness-item ${item.ok ? "ready" : "pending"}`} key={item.label}>
-            {item.ok ? <CheckCircle2 size={18} aria-hidden="true" /> : <AlertTriangle size={18} aria-hidden="true" />}
-            <div>
-              <strong>{item.label}</strong>
-              <small>{item.detail}</small>
-            </div>
-          </article>
-        ))}
-      </section>
-
-      <section className="capability-panel always-visible" aria-label="生产能力边界">
-        <div>
-          <strong>自动保证范围</strong>
-          <p>页面、页边距、正文/标题样式、基础页眉页脚、页码、表格线、题注、目录域、DOCX/PDF 下载和质量报告。</p>
-        </div>
-        <div>
-          <strong>安全边界</strong>
-          <p>复杂脚注尾注、浮动图片、PDF 文本不可抽取、无法确认的规则不会被显示成合规，会进入复核状态。</p>
-        </div>
-      </section>
-
-      <nav className="workflow-nav" aria-label="工作流导航">
-        {workflowAreas.map((area, index) => {
-          const Icon = area.icon;
-          return (
-            <a href={`#${area.anchor}`} key={area.title}>
-              <span>{index + 1}</span>
-              <Icon size={18} aria-hidden="true" />
-              <strong>{area.title}</strong>
-              <small>{area.description}</small>
-            </a>
-          );
-        })}
-      </nav>
-
-      <section className="workflow-step" id="intake" aria-labelledby="intake-title">
-        <div className="step-heading">
-          <span className="step-index">1</span>
+          <div className="brand-mark"><FileText size={24} /></div>
           <div>
-            <p className="eyebrow">Agent intake</p>
-            <h2 id="intake-title">获取格式需求</h2>
+            <strong>Perfect DOCX</strong>
+            <span>format compiler</span>
           </div>
         </div>
 
-        <div className="intake-switch" role="tablist" aria-label="格式需求入口">
-          <button
-            type="button"
-            className={intakeMode === "conversation" ? "selected" : ""}
-            onClick={() => {
-              setIntakeMode("conversation");
-              setRequirementError(null);
-            }}
-          >
-            <MessageSquareText size={18} aria-hidden="true" />
-            对话生成 Profile
-          </button>
-          <button
-            type="button"
-            className={intakeMode === "document" ? "selected" : ""}
-            onClick={() => {
-              setIntakeMode("document");
-              setRequirementError(null);
-            }}
-          >
-            <FileSearch size={18} aria-hidden="true" />
-            上传格式文档生成 Profile
-          </button>
-        </div>
+        <nav className="step-rail" aria-label="工作流">
+          {steps.map((step, index) => {
+            const Icon = step.icon;
+            return (
+              <a href={`#${step.id}`} className="step-link" key={step.id}>
+                <span>{index + 1}</span>
+                <Icon size={18} />
+                {step.label}
+              </a>
+            );
+          })}
+        </nav>
 
-        {intakeMode === "conversation" ? (
-          <div className="intake-panel">
-            <label className="field-block">
-              <span>格式要求描述</span>
-              <textarea
-                value={requirementText}
-                onChange={(event) => {
-                  setRequirementText(event.target.value);
-                  setRequirementError(null);
-                }}
-                placeholder="例如：A4，正文宋体小四，英文 Times New Roman，1.5 倍行距，首行缩进 2 字符，一级标题黑体三号居中。"
-              />
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                onClick={() => void createRequirementSession()}
-                disabled={isCreatingRequirementSession || !requirementText.trim()}
-              >
-                <ClipboardCheck size={18} aria-hidden="true" />
-                {isCreatingRequirementSession ? "分析中" : "让 Agent 拆解并追问"}
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={refreshRequirementSession}
-                disabled={!requirementSession || isRefreshingRequirementSession}
-              >
-                <RefreshCcw size={18} aria-hidden="true" />
-                {isRefreshingRequirementSession ? "刷新中" : "刷新会话"}
-              </button>
-            </div>
+        <section className="runtime-panel">
+          <div className="runtime-row">
+            <span>API</span>
+            <strong className={health ? "ok" : "bad"}>{health ? "online" : "offline"}</strong>
           </div>
-        ) : (
-          <div className="intake-panel split">
-            <form className="upload-box" onSubmit={uploadRuleFile}>
-              <label className="file-picker">
-                <Upload size={18} aria-hidden="true" />
-                <span>{selectedRuleFile ? selectedRuleFile.name : "选择格式要求 .doc/.docx"}</span>
-                <input
-                  type="file"
-                  accept=".doc,.docx"
-                  onChange={(event) => {
-                    setSelectedRuleFile(event.target.files?.[0] ?? null);
-                    setRuleUploadError(null);
-                  }}
-                />
-              </label>
-              <button type="submit" disabled={isUploadingRuleFile}>
-                <Upload size={18} aria-hidden="true" />
-                {isUploadingRuleFile || isCreatingRequirementSession ? "上传/分析中" : "上传并分析规则文档"}
-              </button>
-              {ruleFileRecord && <p className="record-line">{ruleFileRecord.filename} · {ruleFileRecord.file_id}</p>}
-              {ruleUploadError && <p className="error-text">{ruleUploadError}</p>}
-            </form>
-            <div className="analysis-box">
-              <strong>{ruleFileRecord ? ruleFileRecord.filename : "等待规则文档"}</strong>
-              <p>
-                {ruleFileRecord
-                  ? "文档已登记；若需要重新分析，可再次启动 Agent。"
-                  : "上传学校模板、期刊格式说明或自定义规则文档；上传后会立即调用 LLM Agent 分析。"}
-              </p>
-              <button type="button" onClick={() => void createRequirementSession()} disabled={isCreatingRequirementSession || !ruleFileRecord}>
-                <FileSearch size={18} aria-hidden="true" />
-                {isCreatingRequirementSession ? "抽取中" : "分析格式文档"}
-              </button>
-            </div>
+          <div className="runtime-row">
+            <span>LLM</span>
+            <strong className={llmTone(activeLlmHealth)}>{llmLabel(activeLlmHealth)}</strong>
           </div>
-        )}
+          <button type="button" className="runtime-button" onClick={checkLlmHealth} disabled={busy === "llm-health"}>
+            {busy === "llm-health" ? "checking..." : "检测 LLM"}
+          </button>
+          <p className={`runtime-note ${llmTone(activeLlmHealth)}`}>{llmDetail(activeLlmHealth)}</p>
+          <div className="runtime-row">
+            <span>PDF</span>
+            <strong className={health?.services.soffice_configured ? "ok" : "bad"}>{health?.services.soffice_configured ? "ready" : "docx only"}</strong>
+          </div>
+          {healthError && <p className="rail-error">{healthError}</p>}
+        </section>
+      </aside>
 
-        {(requirementSession || requirementError) && (
-          <section className="agent-result" aria-live="polite">
-            <div className="result-heading">
+      <section className="workbench">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Custom Word/PDF Export</p>
+            <h1>自定义格式导出工作台</h1>
+          </div>
+          <button type="button" className="icon-button" onClick={() => void loadProfiles()} title="刷新 Profile">
+            <RefreshCcw size={18} />
+          </button>
+        </header>
+
+        <section className="command-center" aria-label="工作台总览">
+          <article className="command-tile accent-agent">
+            <div>
+              <span>Agent Intake</span>
+              <strong>LLM {llmLabel(activeLlmHealth)}</strong>
+            </div>
+            <small>{requirementSession ? `${requirementSession.status} · ${requirementSession.requirement_summary?.items.length ?? 0} rules` : llmDetail(activeLlmHealth)}</small>
+          </article>
+          <article className="command-tile">
+            <div>
+              <span>Profile JSON</span>
+              <strong>{profileDraft ? `${profileDraft.name} v${profileDraft.version}` : "未选择"}</strong>
+            </div>
+            <small>{stats.locked} locked · {stats.evidence} evidence · {stats.missing} missing</small>
+          </article>
+          <article className="command-tile">
+            <div>
+              <span>Rule Coverage</span>
+              <strong>{stats.total ? `${stats.supported}/${stats.total} supported` : "等待 Profile"}</strong>
+            </div>
+            <small>{stats.partial} partial · {stats.delegated} template · {stats.blocked} blocked</small>
+          </article>
+          <article className="command-tile accent-delivery">
+            <div>
+              <span>Export Gate</span>
+              <strong>{job ? job.status : batchRun ? batchRun.status : "待导出"}</strong>
+            </div>
+            <small>{inputFileRecords.length} source · {selectedOutputFormats.join("+").toUpperCase() || "no output"} · {gatePassed(job?.delivery_gate_summary) ? "QC passed" : "QC pending"}</small>
+          </article>
+        </section>
+
+        <section id="profile" className="workspace-grid profile-grid">
+          <div className="panel primary-panel">
+            <div className="panel-heading">
               <div>
-                <p className="eyebrow">Agent summary</p>
-                <h3>规则拆解结果</h3>
+                <p className="eyebrow">Step 1</p>
+                <h2>Profile 创建与选择</h2>
               </div>
-              {requirementSession && <span className={`status-badge ${requirementSession.status}`}>{requirementSession.status}</span>}
+              <button type="button" className="secondary-button" onClick={createVisualDraft}>
+                <PencilRuler size={17} /> 新建草案
+              </button>
             </div>
-            {requirementError && <p className="error-text">{requirementError}</p>}
-            {requirementSession && (
-              <>
-                <dl className="compact-meta">
-                  <div>
-                    <dt>session_id</dt>
-                    <dd>{requirementSession.session_id}</dd>
-                  </div>
-                  <div>
-                    <dt>source</dt>
-                    <dd>{requirementSession.source_type}{requirementSession.file_id ? ` · ${requirementSession.file_id}` : ""}</dd>
-                  </div>
-                  <div>
-                    <dt>profile_draft</dt>
-                    <dd>
-                      {requirementSession.profile_draft
-                        ? `${requirementSession.profile_draft.name} v${requirementSession.profile_draft.version}`
-                        : "N/A"}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>missing</dt>
-                    <dd>{requirementSession.missing_fields.length}</dd>
-                  </div>
-                </dl>
-                {requirementSession.status !== "confirmed" && (
-                  <p className="warning-note">这只是 Agent 草案，尚未保存为当前 Profile；未确认前不会用于导出。</p>
-                )}
-                {requirementSession.error_message && <p className="error-text">{requirementSession.error_message}</p>}
-                {requirementSession.messages.length > 0 && (
-                  <div className="chat-transcript" aria-label="Agent 对话">
-                    {requirementSession.messages.slice(-4).map((message) => (
-                      <article className={`chat-bubble ${message.role}`} key={`${message.role}-${message.created_at}-${message.content}`}>
-                        <strong>{message.role}</strong>
-                        <p>{message.content}</p>
-                      </article>
-                    ))}
-                  </div>
-                )}
-                {requirementSession.requirement_summary?.items.length ? (
-                  <div className="review-grid">
-                    {requirementSession.requirement_summary.items.map((item) => (
-                      <article
-                        className={`review-card ${item.needs_confirmation ? "needs-confirmation" : ""}`}
-                        key={`${item.field_path}-${item.value}`}
-                      >
-                        <div className="rule-card-heading">
-                          <strong>{item.label}</strong>
-                          <span className={`rule-source ${item.source}`}>{item.source}</span>
-                        </div>
-                        <p>{item.value}</p>
-                        <small>
-                          {item.field_path} · {Math.round(item.confidence * 100)}% · {item.supported ? "支持" : "暂不支持"}
-                          {item.needs_confirmation ? " · 待确认" : ""}
-                        </small>
-                      </article>
-                    ))}
-                  </div>
-                ) : null}
-                {requirementSession.uncertain_items.length > 0 && (
-                  <div className="review-grid">
-                    {requirementSession.uncertain_items.map((item) => (
-                      <article className="review-card warning-card" key={`${item.field_path}-${item.message}`}>
-                        <strong>{item.field_path}</strong>
-                        <p>{item.message}</p>
-                        <small>{item.suggestion}</small>
-                      </article>
-                    ))}
-                  </div>
-                )}
-                {requirementSession.evidence.length > 0 && (
-                  <div className="review-grid">
-                    {requirementSession.evidence.map((item) => (
-                      <article className="review-card" key={`${item.field_path}-${item.quote ?? item.note ?? item.confidence}`}>
-                        <strong>{item.field_path}</strong>
-                        <p>{item.quote || item.note || "No direct quote"}</p>
-                        <small>{Math.round(item.confidence * 100)}% · {item.source}</small>
-                      </article>
-                    ))}
-                  </div>
-                )}
-                <div className="intake-panel">
-                  <label className="field-block">
-                    <span>补充回答 / 修正规则</span>
-                    <textarea
-                      value={requirementFollowUp}
-                      onChange={(event) => setRequirementFollowUp(event.target.value)}
-                      placeholder="例如：页眉居中写学校名称，页码页脚居中；二级标题左对齐黑体小四。"
-                    />
-                  </label>
-                  <div className="action-row">
-                    <button type="button" onClick={sendRequirementMessage} disabled={isSendingRequirementMessage || !requirementFollowUp.trim()}>
-                      <MessageSquareText size={18} aria-hidden="true" />
-                      {isSendingRequirementMessage ? "提交中" : "提交给 Agent 继续拆解"}
-                    </button>
-                    {requirementSession.profile_draft && (
-                      <button type="button" className="secondary-button" onClick={loadRequirementDraft}>
-                        <Save size={18} aria-hidden="true" />
-                        载入为 Profile 草案
-                      </button>
-                    )}
-                  </div>
+
+            <div className="segmented-control" aria-label="Profile 输入方式">
+              <button type="button" className={intakeMode === "conversation" ? "active" : ""} onClick={() => setIntakeMode("conversation")}>
+                <MessageSquareText size={16} /> 对话
+              </button>
+              <button type="button" className={intakeMode === "document" ? "active" : ""} onClick={() => setIntakeMode("document")}>
+                <Upload size={16} /> 格式文档
+              </button>
+              <button type="button" className={intakeMode === "visual" ? "active" : ""} onClick={() => setIntakeMode("visual")}>
+                <PencilRuler size={16} /> 可视化
+              </button>
+            </div>
+
+            {intakeMode === "conversation" && (
+              <form className="intake-form" onSubmit={createRequirementSession}>
+                <textarea
+                  value={requirementText}
+                  onChange={(event) => setRequirementText(event.target.value)}
+                  placeholder="正文宋体小四，英文 Times New Roman，字色黑色，1.5 倍行距，标题黑体三号居中..."
+                />
+                <div className="actions-row">
+                  <button type="submit" disabled={busy === "requirement" || !requirementText.trim()}>
+                    <MessageSquareText size={17} /> 让 Agent 拆解
+                  </button>
                 </div>
-                {requirementSession.profile_draft && (
-                  <div className="confirm-profile-panel">
+              </form>
+            )}
+
+            {intakeMode === "document" && (
+              <div className="document-intake">
+                <div className="source-kind-switch" aria-label="格式文档类型">
+                  <label className={ruleFileKind === "rule_document" ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name="rule-file-kind"
+                      checked={ruleFileKind === "rule_document"}
+                      onChange={() => setRuleFileKind("rule_document")}
+                    />
+                    <span>格式规则文档</span>
+                    <small>学校/期刊的文字要求</small>
+                  </label>
+                  <label className={ruleFileKind === "style_sample_docx" ? "selected" : ""}>
+                    <input
+                      type="radio"
+                      name="rule-file-kind"
+                      checked={ruleFileKind === "style_sample_docx"}
+                      onChange={() => setRuleFileKind("style_sample_docx")}
+                    />
+                    <span>格式样本文档</span>
+                    <small>已经排好格式的 Word</small>
+                  </label>
+                </div>
+                <textarea
+                  value={requirementText}
+                  onChange={(event) => setRequirementText(event.target.value)}
+                  placeholder="可选补充：例如以正文格式为准，但页眉改为学院名称；或者要求 Agent 重点关注标题、页眉页脚、图表题注。"
+                />
+                <div className="file-strip">
+                  <input type="file" accept=".doc,.docx" onChange={(event) => setRuleFile(event.target.files?.[0] ?? null)} />
+                  <button type="button" onClick={uploadRuleAndAnalyze} disabled={!ruleFile || busy === "rule-file"}>
+                    <Upload size={17} /> 分析并更新 Profile JSON
+                  </button>
+                  {ruleFileRecord && <span>{ruleFileRecord.filename}</span>}
+                </div>
+              </div>
+            )}
+
+            {intakeMode === "visual" && profileDraft && (
+              <div className="visual-editor expanded">
+                <section className="editor-section span-2">
+                  <div className="editor-section-heading">
+                    <span>Profile</span>
+                    <strong>命名与版本</strong>
+                  </div>
+                  <div className="editor-grid">
                     <label>
-                      <span>Profile 名称</span>
+                      Profile 名称
                       <input value={confirmProfileName} onChange={(event) => setConfirmProfileName(event.target.value)} />
                     </label>
                     <label>
-                      <span>版本</span>
+                      版本
                       <input value={confirmProfileVersion} onChange={(event) => setConfirmProfileVersion(event.target.value)} />
                     </label>
-                    <label>
-                      <span>用途说明</span>
-                      <input value={confirmProfileDescription} onChange={(event) => setConfirmProfileDescription(event.target.value)} />
+                    <label className="span-2">
+                      描述
+                      <input value={confirmProfileDescription} onChange={(event) => setConfirmProfileDescription(event.target.value)} placeholder="例如：华东师范大学本科毕业论文 v2026" />
                     </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Page</span>
+                    <strong>纸张、页边距与网格</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label>
+                      纸张
+                      <select value={profileDraft.page.size} onChange={(event) => updateDraft((draft) => { draft.page.size = event.target.value as "A4" | "Letter"; })}>
+                        <option value="A4">A4</option>
+                        <option value="Letter">Letter</option>
+                      </select>
+                    </label>
+                    <label>
+                      方向
+                      <select value={profileDraft.page.orientation} onChange={(event) => updateDraft((draft) => { draft.page.orientation = event.target.value as "portrait" | "landscape"; })}>
+                        <option value="portrait">纵向</option>
+                        <option value="landscape">横向</option>
+                      </select>
+                    </label>
+                    <label>
+                      上边距 cm
+                      <input type="number" step="0.1" value={profileDraft.page.margins_cm.top} onChange={(event) => updateDraft((draft) => { draft.page.margins_cm.top = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      下边距 cm
+                      <input type="number" step="0.1" value={profileDraft.page.margins_cm.bottom} onChange={(event) => updateDraft((draft) => { draft.page.margins_cm.bottom = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      左边距 cm
+                      <input type="number" step="0.1" value={profileDraft.page.margins_cm.left} onChange={(event) => updateDraft((draft) => { draft.page.margins_cm.left = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      右边距 cm
+                      <input type="number" step="0.1" value={profileDraft.page.margins_cm.right} onChange={(event) => updateDraft((draft) => { draft.page.margins_cm.right = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      装订线 cm
+                      <input type="number" step="0.1" value={profileDraft.page.margins_cm.gutter} onChange={(event) => updateDraft((draft) => { draft.page.margins_cm.gutter = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      网格类型
+                      <select value={profileDraft.document_grid.type} onChange={(event) => updateDraft((draft) => { draft.document_grid.type = event.target.value as "none" | "line" | "line_and_character"; draft.document_grid.enabled = event.target.value !== "none"; })}>
+                        <option value="none">不启用</option>
+                        <option value="line">只指定行网格</option>
+                        <option value="line_and_character">行和字符网格</option>
+                      </select>
+                    </label>
+                    <label>
+                      每行字符
+                      <input type="number" value={profileDraft.document_grid.characters_per_line ?? ""} onChange={(event) => updateDraft((draft) => { draft.document_grid.characters_per_line = event.target.value ? Number(event.target.value) : null; })} />
+                    </label>
+                    <label>
+                      每页行数
+                      <input type="number" value={profileDraft.document_grid.lines_per_page ?? ""} onChange={(event) => updateDraft((draft) => { draft.document_grid.lines_per_page = event.target.value ? Number(event.target.value) : null; })} />
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.document_grid.snap_to_grid} onChange={(event) => updateDraft((draft) => { draft.document_grid.snap_to_grid = event.target.checked; })} />
+                      段落贴齐文档网格
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Body</span>
+                    <strong>正文中英文格式</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label>
+                      中文字体
+                      <input value={profileDraft.body.font.chinese} onChange={(event) => updateDraft((draft) => { draft.body.font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      英文字体
+                      <input value={profileDraft.body.font.latin} onChange={(event) => updateDraft((draft) => { draft.body.font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      字号 pt
+                      <input type="number" step="0.5" value={profileDraft.body.font.size_pt} onChange={(event) => updateDraft((draft) => { draft.body.font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      字重
+                      <select value={profileDraft.body.font.weight} onChange={(event) => updateDraft((draft) => { draft.body.font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      字色
+                      <input type="color" value={colorInputValue(profileDraft.body.font.color)} onChange={(event) => updateDraft((draft) => { draft.body.font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label>
+                      对齐
+                      <select value={profileDraft.body.alignment} onChange={(event) => updateDraft((draft) => { draft.body.alignment = event.target.value as "left" | "center" | "right" | "justified"; })}>
+                        <option value="justified">两端对齐</option>
+                        <option value="left">左对齐</option>
+                        <option value="center">居中</option>
+                        <option value="right">右对齐</option>
+                      </select>
+                    </label>
+                    <label>
+                      首行缩进 字符
+                      <input type="number" step="0.5" value={profileDraft.body.first_line_indent_chars} onChange={(event) => updateDraft((draft) => { draft.body.first_line_indent_chars = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      行距
+                      <input type="number" step="0.1" value={profileDraft.body.line_spacing} onChange={(event) => updateDraft((draft) => { draft.body.line_spacing = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      段前 pt
+                      <input type="number" step="0.5" value={profileDraft.body.space_before_pt} onChange={(event) => updateDraft((draft) => { draft.body.space_before_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      段后 pt
+                      <input type="number" step="0.5" value={profileDraft.body.space_after_pt} onChange={(event) => updateDraft((draft) => { draft.body.space_after_pt = Number(event.target.value); })} />
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section span-2">
+                  <div className="editor-section-heading">
+                    <span>Headings</span>
+                    <strong>一级、二级、三级标题</strong>
+                  </div>
+                  <div className="heading-editor-list">
+                    {[1, 2, 3].map((level) => {
+                      const heading = profileDraft.headings.find((item) => item.level === level) ?? defaultHeading(profileDraft, level);
+                      return (
+                        <article className="heading-rule" key={level}>
+                          <div className="heading-rule-title">
+                            <strong>{level} 级标题</strong>
+                            <span>{heading.numbering}</span>
+                          </div>
+                          <div className="editor-grid compact-grid">
+                            <label>
+                              中文字体
+                              <input value={heading.font.chinese} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).font.chinese = event.target.value; })} />
+                            </label>
+                            <label>
+                              英文字体
+                              <input value={heading.font.latin} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).font.latin = event.target.value; })} />
+                            </label>
+                            <label>
+                              字号 pt
+                              <input type="number" step="0.5" value={heading.font.size_pt} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).font.size_pt = Number(event.target.value); })} />
+                            </label>
+                            <label>
+                              字重
+                              <select value={heading.font.weight} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).font.weight = event.target.value as TextFont["weight"]; })}>
+                                <option value="normal">常规</option>
+                                <option value="bold">加粗</option>
+                              </select>
+                            </label>
+                            <label>
+                              字色
+                              <input type="color" value={colorInputValue(heading.font.color)} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).font.color = profileColorValue(event.target.value); })} />
+                            </label>
+                            <label>
+                              对齐
+                              <select value={heading.alignment} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).alignment = event.target.value as "left" | "center" | "right" | "justified"; })}>
+                                <option value="left">左对齐</option>
+                                <option value="center">居中</option>
+                                <option value="right">右对齐</option>
+                                <option value="justified">两端对齐</option>
+                              </select>
+                            </label>
+                            <label>
+                              编号样式
+                              <input value={heading.numbering} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).numbering = event.target.value; })} placeholder="chapter / decimal / none" />
+                            </label>
+                            <label>
+                              行距
+                              <input type="number" step="0.1" value={heading.line_spacing ?? ""} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).line_spacing = event.target.value ? Number(event.target.value) : null; })} />
+                            </label>
+                            <label>
+                              段前 pt
+                              <input type="number" step="0.5" value={heading.space_before_pt} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).space_before_pt = Number(event.target.value); })} />
+                            </label>
+                            <label>
+                              段后 pt
+                              <input type="number" step="0.5" value={heading.space_after_pt} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).space_after_pt = Number(event.target.value); })} />
+                            </label>
+                            <label>
+                              首行缩进 字符
+                              <input type="number" step="0.5" value={heading.first_line_indent_chars} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).first_line_indent_chars = Number(event.target.value); })} />
+                            </label>
+                            <label className="switch-row">
+                              <input type="checkbox" checked={heading.keep_with_next} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).keep_with_next = event.target.checked; })} />
+                              与下段同页
+                            </label>
+                            <label className="switch-row">
+                              <input type="checkbox" checked={heading.page_break_before} onChange={(event) => updateDraft((draft) => { ensureHeading(draft, level).page_break_before = event.target.checked; })} />
+                              标题前分页
+                            </label>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>TOC & List</span>
+                    <strong>目录与序号</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.toc.enabled} onChange={(event) => updateDraft((draft) => { draft.toc.enabled = event.target.checked; })} />
+                      生成目录
+                    </label>
+                    <label>
+                      目录标题
+                      <input value={profileDraft.toc.title} onChange={(event) => updateDraft((draft) => { draft.toc.title = event.target.value; })} />
+                    </label>
+                    <label>
+                      目录层级
+                      <input type="number" value={profileDraft.toc.include_levels} onChange={(event) => updateDraft((draft) => { draft.toc.include_levels = Number(event.target.value); })} />
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.toc.show_page_numbers} onChange={(event) => updateDraft((draft) => { draft.toc.show_page_numbers = event.target.checked; })} />
+                      显示页码
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.toc.right_align_page_numbers} onChange={(event) => updateDraft((draft) => { draft.toc.right_align_page_numbers = event.target.checked; })} />
+                      页码右对齐
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.toc.update_fields_on_open} onChange={(event) => updateDraft((draft) => { draft.toc.update_fields_on_open = event.target.checked; })} />
+                      打开时更新域
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.toc.use_hyperlinks} onChange={(event) => updateDraft((draft) => { draft.toc.use_hyperlinks = event.target.checked; })} />
+                      目录超链接
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.numbering.enabled} onChange={(event) => updateDraft((draft) => { draft.numbering.enabled = event.target.checked; })} />
+                      启用标题编号
+                    </label>
+                    <label>
+                      标题编号模式
+                      <input value={profileDraft.numbering.heading_pattern ?? ""} onChange={(event) => updateDraft((draft) => { draft.numbering.heading_pattern = event.target.value || null; })} placeholder="第%1章 / %1.%2" />
+                    </label>
+                    <label>
+                      有序列表样式
+                      <input value={profileDraft.list_numbering.ordered_pattern} onChange={(event) => updateDraft((draft) => { draft.list_numbering.ordered_pattern = event.target.value; })} placeholder="1. / (1) / 一、" />
+                    </label>
+                    <label>
+                      无序列表符号
+                      <input value={profileDraft.list_numbering.unordered_marker} onChange={(event) => updateDraft((draft) => { draft.list_numbering.unordered_marker = event.target.value; })} />
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.list_numbering.multilevel_enabled} onChange={(event) => updateDraft((draft) => { draft.list_numbering.multilevel_enabled = event.target.checked; })} />
+                      多级列表
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.list_numbering.restart_per_section} onChange={(event) => updateDraft((draft) => { draft.list_numbering.restart_per_section = event.target.checked; })} />
+                      列表按节重启
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.numbering.restart_per_section} onChange={(event) => updateDraft((draft) => { draft.numbering.restart_per_section = event.target.checked; })} />
+                      标题按节重启
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Header</span>
+                    <strong>页眉、页脚与页码</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label className="span-2">
+                      页眉文本
+                      <input value={profileDraft.header_footer.header_text ?? ""} onChange={(event) => updateDraft((draft) => { draft.header_footer.header_text = event.target.value || null; })} />
+                    </label>
+                    <label className="span-2">
+                      页脚文本
+                      <input value={profileDraft.header_footer.footer_text ?? ""} onChange={(event) => updateDraft((draft) => { draft.header_footer.footer_text = event.target.value || null; })} />
+                    </label>
+                    <label>
+                      页眉对齐
+                      <select value={profileDraft.header_footer.header_alignment} onChange={(event) => updateDraft((draft) => { draft.header_footer.header_alignment = event.target.value as "left" | "center" | "right" | "justified"; })}>
+                        <option value="left">左</option>
+                        <option value="center">居中</option>
+                        <option value="right">右</option>
+                        <option value="justified">两端</option>
+                      </select>
+                    </label>
+                    <label>
+                      页脚对齐
+                      <select value={profileDraft.header_footer.footer_alignment} onChange={(event) => updateDraft((draft) => { draft.header_footer.footer_alignment = event.target.value as "left" | "center" | "right" | "justified"; })}>
+                        <option value="left">左</option>
+                        <option value="center">居中</option>
+                        <option value="right">右</option>
+                        <option value="justified">两端</option>
+                      </select>
+                    </label>
+                    <label>
+                      页码格式
+                      <select value={profileDraft.header_footer.page_number_format} onChange={(event) => updateDraft((draft) => { draft.header_footer.page_number_format = event.target.value as "arabic" | "roman_lower" | "roman_upper" | "none"; })}>
+                        <option value="arabic">1, 2, 3</option>
+                        <option value="roman_lower">i, ii, iii</option>
+                        <option value="roman_upper">I, II, III</option>
+                        <option value="none">无页码</option>
+                      </select>
+                    </label>
+                    <label>
+                      起始页码
+                      <input type="number" value={profileDraft.header_footer.page_number_start} onChange={(event) => updateDraft((draft) => { draft.header_footer.page_number_start = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      页眉页脚字体
+                      <input value={profileDraft.header_footer.font.chinese} onChange={(event) => updateDraft((draft) => { draft.header_footer.font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      页眉页脚英文字体
+                      <input value={profileDraft.header_footer.font.latin} onChange={(event) => updateDraft((draft) => { draft.header_footer.font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      字号 pt
+                      <input type="number" step="0.5" value={profileDraft.header_footer.font.size_pt} onChange={(event) => updateDraft((draft) => { draft.header_footer.font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      字重
+                      <select value={profileDraft.header_footer.font.weight} onChange={(event) => updateDraft((draft) => { draft.header_footer.font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      字色
+                      <input type="color" value={colorInputValue(profileDraft.header_footer.font.color)} onChange={(event) => updateDraft((draft) => { draft.header_footer.font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.header_footer.footer_page_number} onChange={(event) => updateDraft((draft) => { draft.header_footer.footer_page_number = event.target.checked; })} />
+                      页脚显示页码
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.header_footer.different_first_page} onChange={(event) => updateDraft((draft) => { draft.header_footer.different_first_page = event.target.checked; })} />
+                      首页不同
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.header_footer.different_odd_even} onChange={(event) => updateDraft((draft) => { draft.header_footer.different_odd_even = event.target.checked; })} />
+                      奇偶页不同
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Tables</span>
+                    <strong>表格与表名</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label>
+                      表名位置
+                      <select value={profileDraft.table.caption.position} onChange={(event) => updateDraft((draft) => { draft.table.caption.position = event.target.value as "above" | "below"; draft.table.enforce_caption_above = event.target.value === "above"; })}>
+                        <option value="above">表格正上方</option>
+                        <option value="below">表格下方</option>
+                      </select>
+                    </label>
+                    <label>
+                      中文前缀
+                      <input value={profileDraft.table.caption.prefix} onChange={(event) => updateDraft((draft) => { draft.table.caption.prefix = event.target.value; })} />
+                    </label>
+                    <label>
+                      英文前缀
+                      <input value={profileDraft.table.caption.english_prefix ?? ""} onChange={(event) => updateDraft((draft) => { draft.table.caption.english_prefix = event.target.value || null; })} />
+                    </label>
+                    <label>
+                      题注分隔符
+                      <input value={profileDraft.table.caption.separator} onChange={(event) => updateDraft((draft) => { draft.table.caption.separator = event.target.value; })} placeholder="空格 / ： / -" />
+                    </label>
+                    <label>
+                      编号范围
+                      <select value={profileDraft.table.caption.numbering} onChange={(event) => updateDraft((draft) => { draft.table.caption.numbering = event.target.value as "continuous" | "chapter" | "section"; })}>
+                        <option value="continuous">全文连续</option>
+                        <option value="chapter">按章</option>
+                        <option value="section">按节</option>
+                      </select>
+                    </label>
+                    <label>
+                      表名中文字体
+                      <input value={profileDraft.table.caption.font.chinese} onChange={(event) => updateDraft((draft) => { draft.table.caption.font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      表名英文字体
+                      <input value={profileDraft.table.caption.font.latin} onChange={(event) => updateDraft((draft) => { draft.table.caption.font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      表名字号 pt
+                      <input type="number" step="0.5" value={profileDraft.table.caption.font.size_pt} onChange={(event) => updateDraft((draft) => { draft.table.caption.font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      表名字重
+                      <select value={profileDraft.table.caption.font.weight} onChange={(event) => updateDraft((draft) => { draft.table.caption.font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      表名字色
+                      <input type="color" value={colorInputValue(profileDraft.table.caption.font.color)} onChange={(event) => updateDraft((draft) => { draft.table.caption.font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label>
+                      表格线型
+                      <select value={profileDraft.table.border_style} onChange={(event) => updateDraft((draft) => { draft.table.border_style = event.target.value as "three_line" | "full_grid" | "minimal" | "custom"; })}>
+                        <option value="three_line">三线表</option>
+                        <option value="full_grid">全框线</option>
+                        <option value="minimal">极简线</option>
+                        <option value="custom">自定义</option>
+                      </select>
+                    </label>
+                    <label>
+                      表注位置
+                      <select value={profileDraft.table.notes_position} onChange={(event) => updateDraft((draft) => { draft.table.notes_position = event.target.value as "none" | "below" | "above"; })}>
+                        <option value="none">无表注</option>
+                        <option value="below">表格下方</option>
+                        <option value="above">表格上方</option>
+                      </select>
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.table.caption.bilingual} onChange={(event) => updateDraft((draft) => { draft.table.caption.bilingual = event.target.checked; })} />
+                      中外文对照表名
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.table.header_repeat} onChange={(event) => updateDraft((draft) => { draft.table.header_repeat = event.target.checked; })} />
+                      跨页重复表头
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.table.autofit} onChange={(event) => updateDraft((draft) => { draft.table.autofit = event.target.checked; })} />
+                      自动适配页宽
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Figures</span>
+                    <strong>插图与图名</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label>
+                      图名位置
+                      <select value={profileDraft.figure.caption.position} onChange={(event) => updateDraft((draft) => { draft.figure.caption.position = event.target.value as "above" | "below"; draft.figure.enforce_caption_below = event.target.value === "below"; })}>
+                        <option value="below">图件正下方</option>
+                        <option value="above">图件上方</option>
+                      </select>
+                    </label>
+                    <label>
+                      插图放置
+                      <select value={profileDraft.figure.placement} onChange={(event) => updateDraft((draft) => { draft.figure.placement = event.target.value as "inline" | "floating" | "anchored"; })}>
+                        <option value="inline">文中相应处直接给出</option>
+                        <option value="anchored">锚定段落</option>
+                        <option value="floating">浮动环绕</option>
+                      </select>
+                    </label>
+                    <label>
+                      中文前缀
+                      <input value={profileDraft.figure.caption.prefix} onChange={(event) => updateDraft((draft) => { draft.figure.caption.prefix = event.target.value; })} />
+                    </label>
+                    <label>
+                      英文前缀
+                      <input value={profileDraft.figure.caption.english_prefix ?? ""} onChange={(event) => updateDraft((draft) => { draft.figure.caption.english_prefix = event.target.value || null; })} />
+                    </label>
+                    <label>
+                      题注分隔符
+                      <input value={profileDraft.figure.caption.separator} onChange={(event) => updateDraft((draft) => { draft.figure.caption.separator = event.target.value; })} placeholder="空格 / ： / -" />
+                    </label>
+                    <label>
+                      编号范围
+                      <select value={profileDraft.figure.caption.numbering} onChange={(event) => updateDraft((draft) => { draft.figure.caption.numbering = event.target.value as "continuous" | "chapter" | "section"; })}>
+                        <option value="continuous">全文连续</option>
+                        <option value="chapter">按章</option>
+                        <option value="section">按节</option>
+                      </select>
+                    </label>
+                    <label>
+                      半栏图最大 mm
+                      <input type="number" value={profileDraft.figure.half_column_max_mm} onChange={(event) => updateDraft((draft) => { draft.figure.half_column_max_mm = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      通栏图最小 mm
+                      <input type="number" value={profileDraft.figure.full_width_min_mm} onChange={(event) => updateDraft((draft) => { draft.figure.full_width_min_mm = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      通栏图最大 mm
+                      <input type="number" value={profileDraft.figure.full_width_max_mm} onChange={(event) => updateDraft((draft) => { draft.figure.full_width_max_mm = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      图名中文字体
+                      <input value={profileDraft.figure.caption.font.chinese} onChange={(event) => updateDraft((draft) => { draft.figure.caption.font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      图名英文字体
+                      <input value={profileDraft.figure.caption.font.latin} onChange={(event) => updateDraft((draft) => { draft.figure.caption.font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      图名字号 pt
+                      <input type="number" step="0.5" value={profileDraft.figure.caption.font.size_pt} onChange={(event) => updateDraft((draft) => { draft.figure.caption.font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      图名字重
+                      <select value={profileDraft.figure.caption.font.weight} onChange={(event) => updateDraft((draft) => { draft.figure.caption.font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      图名字色
+                      <input type="color" value={colorInputValue(profileDraft.figure.caption.font.color)} onChange={(event) => updateDraft((draft) => { draft.figure.caption.font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.figure.caption.bilingual} onChange={(event) => updateDraft((draft) => { draft.figure.caption.bilingual = event.target.checked; })} />
+                      中外文对照图名
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Academic</span>
+                    <strong>摘要、公式、参考文献</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label>
+                      摘要最少字数
+                      <input type="number" value={profileDraft.abstract.length_range_chars.min} onChange={(event) => updateDraft((draft) => { draft.abstract.length_range_chars.min = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      摘要最多字数
+                      <input type="number" value={profileDraft.abstract.length_range_chars.max} onChange={(event) => updateDraft((draft) => { draft.abstract.length_range_chars.max = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      摘要标题中文字体
+                      <input value={profileDraft.abstract.title_font.chinese} onChange={(event) => updateDraft((draft) => { draft.abstract.title_font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      摘要标题英文字体
+                      <input value={profileDraft.abstract.title_font.latin} onChange={(event) => updateDraft((draft) => { draft.abstract.title_font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      摘要标题字号 pt
+                      <input type="number" step="0.5" value={profileDraft.abstract.title_font.size_pt} onChange={(event) => updateDraft((draft) => { draft.abstract.title_font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      摘要标题字重
+                      <select value={profileDraft.abstract.title_font.weight} onChange={(event) => updateDraft((draft) => { draft.abstract.title_font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      摘要标题字色
+                      <input type="color" value={colorInputValue(profileDraft.abstract.title_font.color)} onChange={(event) => updateDraft((draft) => { draft.abstract.title_font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label>
+                      摘要正文中文字体
+                      <input value={profileDraft.abstract.body_font.chinese} onChange={(event) => updateDraft((draft) => { draft.abstract.body_font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      摘要正文英文字体
+                      <input value={profileDraft.abstract.body_font.latin} onChange={(event) => updateDraft((draft) => { draft.abstract.body_font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      摘要正文字号 pt
+                      <input type="number" step="0.5" value={profileDraft.abstract.body_font.size_pt} onChange={(event) => updateDraft((draft) => { draft.abstract.body_font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      摘要正文字重
+                      <select value={profileDraft.abstract.body_font.weight} onChange={(event) => updateDraft((draft) => { draft.abstract.body_font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      摘要正文字色
+                      <input type="color" value={colorInputValue(profileDraft.abstract.body_font.color)} onChange={(event) => updateDraft((draft) => { draft.abstract.body_font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label>
+                      公式字体
+                      <input value={profileDraft.equations.font} onChange={(event) => updateDraft((draft) => { draft.equations.font = event.target.value; })} />
+                    </label>
+                    <label>
+                      公式对齐
+                      <select value={profileDraft.equations.alignment} onChange={(event) => updateDraft((draft) => { draft.equations.alignment = event.target.value as "left" | "center" | "right" | "justified"; })}>
+                        <option value="center">居中</option>
+                        <option value="left">左对齐</option>
+                        <option value="right">右对齐</option>
+                        <option value="justified">两端对齐</option>
+                      </select>
+                    </label>
+                    <label>
+                      公式编号
+                      <select value={profileDraft.equations.numbering} onChange={(event) => updateDraft((draft) => { draft.equations.numbering = event.target.value as "none" | "left" | "right"; })}>
+                        <option value="right">右侧编号</option>
+                        <option value="left">左侧编号</option>
+                        <option value="none">不编号</option>
+                      </select>
+                    </label>
+                    <label>
+                      参考文献格式
+                      <input value={profileDraft.references.style} onChange={(event) => updateDraft((draft) => { draft.references.style = event.target.value; })} />
+                    </label>
+                    <label>
+                      参考文献悬挂缩进
+                      <input type="number" step="0.5" value={profileDraft.references.hanging_indent_chars} onChange={(event) => updateDraft((draft) => { draft.references.hanging_indent_chars = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      参考文献中文字体
+                      <input value={profileDraft.references.font.chinese} onChange={(event) => updateDraft((draft) => { draft.references.font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      参考文献英文字体
+                      <input value={profileDraft.references.font.latin} onChange={(event) => updateDraft((draft) => { draft.references.font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      参考文献字号 pt
+                      <input type="number" step="0.5" value={profileDraft.references.font.size_pt} onChange={(event) => updateDraft((draft) => { draft.references.font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      参考文献字重
+                      <select value={profileDraft.references.font.weight} onChange={(event) => updateDraft((draft) => { draft.references.font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      参考文献字色
+                      <input type="color" value={colorInputValue(profileDraft.references.font.color)} onChange={(event) => updateDraft((draft) => { draft.references.font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Units</span>
+                    <strong>计量、计价与一致性</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label className="span-2">
+                      计量单位
+                      <input value={profileDraft.unit_rules.measurement_units.join("，")} onChange={(event) => updateDraft((draft) => { draft.unit_rules.measurement_units = splitCsv(event.target.value); })} placeholder="mm，cm，m，kg，s" />
+                    </label>
+                    <label className="span-2">
+                      计价单位
+                      <input value={profileDraft.unit_rules.currency_units.join("，")} onChange={(event) => updateDraft((draft) => { draft.unit_rules.currency_units = splitCsv(event.target.value); })} placeholder="元，万元，CNY，USD" />
+                    </label>
+                    <label>
+                      数字与单位空格
+                      <select value={profileDraft.unit_rules.unit_spacing} onChange={(event) => updateDraft((draft) => { draft.unit_rules.unit_spacing = event.target.value as "preserve" | "space" | "no_space"; })}>
+                        <option value="preserve">保持原文</option>
+                        <option value="space">统一加空格</option>
+                        <option value="no_space">统一不加空格</option>
+                      </select>
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.unit_rules.enforce_consistency} onChange={(event) => updateDraft((draft) => { draft.unit_rules.enforce_consistency = event.target.checked; })} />
+                      检查单位一致性
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.unit_rules.use_si_symbols} onChange={(event) => updateDraft((draft) => { draft.unit_rules.use_si_symbols = event.target.checked; })} />
+                      优先 SI 符号
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.unit_rules.normalize_fullwidth_numbers} onChange={(event) => updateDraft((draft) => { draft.unit_rules.normalize_fullwidth_numbers = event.target.checked; })} />
+                      规范全角数字
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Notes</span>
+                    <strong>脚注、尾注</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label>
+                      中文字体
+                      <input value={profileDraft.notes.font.chinese} onChange={(event) => updateDraft((draft) => { draft.notes.font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      英文字体
+                      <input value={profileDraft.notes.font.latin} onChange={(event) => updateDraft((draft) => { draft.notes.font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      字号 pt
+                      <input type="number" step="0.5" value={profileDraft.notes.font.size_pt} onChange={(event) => updateDraft((draft) => { draft.notes.font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      字重
+                      <select value={profileDraft.notes.font.weight} onChange={(event) => updateDraft((draft) => { draft.notes.font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      字色
+                      <input type="color" value={colorInputValue(profileDraft.notes.font.color)} onChange={(event) => updateDraft((draft) => { draft.notes.font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label>
+                      行距
+                      <input type="number" step="0.1" value={profileDraft.notes.line_spacing} onChange={(event) => updateDraft((draft) => { draft.notes.line_spacing = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      段前 pt
+                      <input type="number" step="0.5" value={profileDraft.notes.space_before_pt} onChange={(event) => updateDraft((draft) => { draft.notes.space_before_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      段后 pt
+                      <input type="number" step="0.5" value={profileDraft.notes.space_after_pt} onChange={(event) => updateDraft((draft) => { draft.notes.space_after_pt = Number(event.target.value); })} />
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section">
+                  <div className="editor-section-heading">
+                    <span>Appendix</span>
+                    <strong>附录标题与正文</strong>
+                  </div>
+                  <div className="editor-grid">
+                    <label>
+                      附录标题中文字体
+                      <input value={profileDraft.appendix.title_font.chinese} onChange={(event) => updateDraft((draft) => { draft.appendix.title_font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      附录标题英文字体
+                      <input value={profileDraft.appendix.title_font.latin} onChange={(event) => updateDraft((draft) => { draft.appendix.title_font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      标题字号 pt
+                      <input type="number" step="0.5" value={profileDraft.appendix.title_font.size_pt} onChange={(event) => updateDraft((draft) => { draft.appendix.title_font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      标题字重
+                      <select value={profileDraft.appendix.title_font.weight} onChange={(event) => updateDraft((draft) => { draft.appendix.title_font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      标题字色
+                      <input type="color" value={colorInputValue(profileDraft.appendix.title_font.color)} onChange={(event) => updateDraft((draft) => { draft.appendix.title_font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label>
+                      标题对齐
+                      <select value={profileDraft.appendix.title_alignment} onChange={(event) => updateDraft((draft) => { draft.appendix.title_alignment = event.target.value as "left" | "center" | "right" | "justified"; })}>
+                        <option value="left">左对齐</option>
+                        <option value="center">居中</option>
+                        <option value="right">右对齐</option>
+                        <option value="justified">两端对齐</option>
+                      </select>
+                    </label>
+                    <label>
+                      附录正文中文字体
+                      <input value={profileDraft.appendix.body_font.chinese} onChange={(event) => updateDraft((draft) => { draft.appendix.body_font.chinese = event.target.value; })} />
+                    </label>
+                    <label>
+                      附录正文英文字体
+                      <input value={profileDraft.appendix.body_font.latin} onChange={(event) => updateDraft((draft) => { draft.appendix.body_font.latin = event.target.value; })} />
+                    </label>
+                    <label>
+                      正文字号 pt
+                      <input type="number" step="0.5" value={profileDraft.appendix.body_font.size_pt} onChange={(event) => updateDraft((draft) => { draft.appendix.body_font.size_pt = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      正文字重
+                      <select value={profileDraft.appendix.body_font.weight} onChange={(event) => updateDraft((draft) => { draft.appendix.body_font.weight = event.target.value as TextFont["weight"]; })}>
+                        <option value="normal">常规</option>
+                        <option value="bold">加粗</option>
+                      </select>
+                    </label>
+                    <label>
+                      正文字色
+                      <input type="color" value={colorInputValue(profileDraft.appendix.body_font.color)} onChange={(event) => updateDraft((draft) => { draft.appendix.body_font.color = profileColorValue(event.target.value); })} />
+                    </label>
+                    <label>
+                      正文对齐
+                      <select value={profileDraft.appendix.body_alignment} onChange={(event) => updateDraft((draft) => { draft.appendix.body_alignment = event.target.value as "left" | "center" | "right" | "justified"; })}>
+                        <option value="justified">两端对齐</option>
+                        <option value="left">左对齐</option>
+                        <option value="center">居中</option>
+                        <option value="right">右对齐</option>
+                      </select>
+                    </label>
+                    <label>
+                      正文行距
+                      <input type="number" step="0.1" value={profileDraft.appendix.body_line_spacing} onChange={(event) => updateDraft((draft) => { draft.appendix.body_line_spacing = Number(event.target.value); })} />
+                    </label>
+                    <label>
+                      正文首行缩进 字符
+                      <input type="number" step="0.5" value={profileDraft.appendix.body_first_line_indent_chars} onChange={(event) => updateDraft((draft) => { draft.appendix.body_first_line_indent_chars = Number(event.target.value); })} />
+                    </label>
+                  </div>
+                </section>
+
+                <section className="editor-section span-2">
+                  <div className="editor-section-heading">
+                    <span>Gate</span>
+                    <strong>内部校验与模板适配</strong>
+                  </div>
+                  <div className="editor-grid gate-grid">
+                    <label>
+                      模板正文槽位
+                      <input value={profileDraft.template_binding.body_slot ?? ""} onChange={(event) => updateDraft((draft) => { draft.template_binding.body_slot = event.target.value || null; })} placeholder="{{BODY}}" />
+                    </label>
+                    <label>
+                      占位符策略
+                      <select value={profileDraft.template_binding.placeholder_policy} onChange={(event) => updateDraft((draft) => { draft.template_binding.placeholder_policy = event.target.value as "fail" | "preserve" | "remove"; })}>
+                        <option value="fail">缺失则失败</option>
+                        <option value="preserve">保留占位符</option>
+                        <option value="remove">删除占位符</option>
+                      </select>
+                    </label>
+                    <label>
+                      校验严格度
+                      <select value={profileDraft.quality.strictness} onChange={(event) => updateDraft((draft) => { draft.quality.strictness = event.target.value as "lenient" | "standard" | "strict"; })}>
+                        <option value="lenient">宽松</option>
+                        <option value="standard">标准</option>
+                        <option value="strict">严格</option>
+                      </select>
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.template_binding.inherit_header_footer} onChange={(event) => updateDraft((draft) => { draft.template_binding.inherit_header_footer = event.target.checked; })} />
+                      继承模板页眉页脚
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.delivery_gate.require_internal_qc} onChange={(event) => updateDraft((draft) => { draft.delivery_gate.require_internal_qc = event.target.checked; })} />
+                      导出前内部校验
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.delivery_gate.allow_auto_fix} onChange={(event) => updateDraft((draft) => { draft.delivery_gate.allow_auto_fix = event.target.checked; })} />
+                      允许自动二次修复
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.delivery_gate.require_pdf_inspection} onChange={(event) => updateDraft((draft) => { draft.delivery_gate.require_pdf_inspection = event.target.checked; })} />
+                      PDF 产物检查
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.delivery_gate.fail_on_unsupported_rules} onChange={(event) => updateDraft((draft) => { draft.delivery_gate.fail_on_unsupported_rules = event.target.checked; })} />
+                      不支持规则时阻断导出
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.llm_final_review.enabled} onChange={(event) => updateDraft((draft) => { draft.llm_final_review.enabled = event.target.checked; })} />
+                      最终 LLM 版面检查
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.llm_final_review.required} onChange={(event) => updateDraft((draft) => { draft.llm_final_review.required = event.target.checked; })} />
+                      LLM 不可用时阻断
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.llm_final_review.check_garbled_text} onChange={(event) => updateDraft((draft) => { draft.llm_final_review.check_garbled_text = event.target.checked; })} />
+                      检查乱码
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.llm_final_review.check_blank_pages} onChange={(event) => updateDraft((draft) => { draft.llm_final_review.check_blank_pages = event.target.checked; })} />
+                      检查异常空白页
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.llm_final_review.check_overlap} onChange={(event) => updateDraft((draft) => { draft.llm_final_review.check_overlap = event.target.checked; })} />
+                      检查重叠错位
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.llm_final_review.check_table_figure_overflow} onChange={(event) => updateDraft((draft) => { draft.llm_final_review.check_table_figure_overflow = event.target.checked; })} />
+                      检查图表出界
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.quality.check_margins} onChange={(event) => updateDraft((draft) => { draft.quality.check_margins = event.target.checked; })} />
+                      检查页边距
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.quality.check_fonts} onChange={(event) => updateDraft((draft) => { draft.quality.check_fonts = event.target.checked; })} />
+                      检查字体
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.quality.check_line_spacing} onChange={(event) => updateDraft((draft) => { draft.quality.check_line_spacing = event.target.checked; })} />
+                      检查行距
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.quality.check_headings} onChange={(event) => updateDraft((draft) => { draft.quality.check_headings = event.target.checked; })} />
+                      检查标题
+                    </label>
+                    <label className="switch-row">
+                      <input type="checkbox" checked={profileDraft.quality.check_references} onChange={(event) => updateDraft((draft) => { draft.quality.check_references = event.target.checked; })} />
+                      检查参考文献
+                    </label>
+                  </div>
+                </section>
+              </div>
+            )}
+
+            {requirementSession && (
+              <section className="agent-result" aria-live="polite">
+                <div className="result-heading">
+                  <strong>{requirementSession.status}</strong>
+                  <span>{requirementSession.requirement_summary?.items.length ?? 0} rules</span>
+                  <span>{requirementSession.missing_fields.length} missing</span>
+                  <span>{requirementSession.uncertain_items.length} uncertain</span>
+                </div>
+                <div className="rule-list">
+                  {(requirementSession.requirement_summary?.items ?? []).map((item) => (
+                    <article className="rule-row" key={`${item.field_path}-${item.value}`}>
+                      <span>{item.field_path}</span>
+                      <strong>{item.value}</strong>
+                    </article>
+                  ))}
+                </div>
+                <textarea
+                  className="followup-box"
+                  value={requirementFollowUp}
+                  onChange={(event) => setRequirementFollowUp(event.target.value)}
+                  placeholder="补充缺失规则，例如：页眉为学校名称，页码底端居中。"
+                />
+                <div className="actions-row">
+                  <button type="button" className="secondary-button" onClick={sendRequirementMessage} disabled={!requirementFollowUp.trim() || busy === "requirement-message"}>
+                    继续补充
+                  </button>
+                  <button type="button" onClick={confirmRequirementProfile} disabled={!requirementSession.profile_draft || busy === "confirm-profile"}>
+                    <Save size={17} /> 保存 Profile
+                  </button>
+                </div>
+              </section>
+            )}
+
+            {requirementError && <p className="error-text"><AlertCircle size={16} /> {requirementError}</p>}
+            {profileError && <p className="error-text"><AlertCircle size={16} /> {profileError}</p>}
+            {profileMessage && <p className="success-text"><CheckCircle2 size={16} /> {profileMessage}</p>}
+          </div>
+
+          <aside className="panel profile-panel">
+            <div className="panel-heading compact">
+              <h3>当前 Profile</h3>
+              <span>{busy === "profiles" ? "loading" : `${profiles.length} profiles`}</span>
+            </div>
+            <select value={selectedProfileKey ?? ""} onChange={(event) => setSelectedProfileKey(event.target.value || null)}>
+              <option value="">选择 Profile</option>
+              {profiles.map((profile) => (
+                <option value={profileKey(profile.profile_id, profile.current_version)} key={profileKey(profile.profile_id, profile.current_version)}>
+                  {profile.name} v{profile.current_version}
+                </option>
+              ))}
+            </select>
+            {profileDraft && (
+              <div className="profile-snapshot">
+                <h3>{profileDraft.name}</h3>
+                <dl>
+                  <div><dt>schema</dt><dd>{profileDraft.schema_version}</dd></div>
+                  <div><dt>paper</dt><dd>{profileDraft.page.size} / {profileDraft.page.orientation}</dd></div>
+                  <div><dt>body</dt><dd>{profileDraft.body.font.chinese} {profileDraft.body.font.size_pt}pt</dd></div>
+                  <div><dt>color</dt><dd>#{profileDraft.body.font.color}</dd></div>
+                  <div><dt>gate</dt><dd>{profileDraft.delivery_gate.require_internal_qc ? "internal" : "off"}</dd></div>
+                </dl>
+                <textarea value={confirmProfileDescription} onChange={(event) => setConfirmProfileDescription(event.target.value)} placeholder="Profile 描述" />
+                <button type="button" onClick={saveVisualProfile} disabled={busy === "save-profile"}>
+                  <Save size={17} /> 保存当前草案
+                </button>
+              </div>
+            )}
+            {profileDraft && (
+              <section className="coverage-panel">
+                <div className="panel-heading compact inspector-heading">
+                  <div>
+                    <h3><ListChecks size={16} /> 规则检查器</h3>
+                    <span>{visibleCoverageItems.length}/{stats.total} fields · {stats.evidence} evidence</span>
+                  </div>
+                  <b className={stats.blocked ? "inspector-badge blocked" : "inspector-badge"}>{stats.blocked ? `${stats.blocked} blocked` : "ready"}</b>
+                </div>
+                <div className="coverage-meter" aria-label="规则支持度">
+                  <span style={{ width: stats.total ? `${Math.max(4, (stats.supported / stats.total) * 100)}%` : "0%" }} />
+                </div>
+                <label className="rule-search">
+                  <Search size={15} />
+                  <input value={ruleSearch} onChange={(event) => setRuleSearch(event.target.value)} placeholder="搜索字段、状态、来源，例如 body.font.color" />
+                </label>
+                <div className="coverage-filter-tabs" aria-label="规则过滤">
+                  {(["all", "supported", "partial", "unsupported", "locked", "missing", "evidence"] as CoverageFilter[]).map((filter) => (
                     <button
                       type="button"
-                      onClick={confirmRequirementProfile}
-                      disabled={isConfirmingRequirementSession || !confirmProfileName.trim() || !confirmProfileVersion.trim()}
+                      className={coverageFilter === filter ? "active" : ""}
+                      onClick={() => setCoverageFilter(filter)}
+                      key={filter}
                     >
-                      <ShieldCheck size={18} aria-hidden="true" />
-                      {isConfirmingRequirementSession ? "保存中" : "确认并保存 Profile"}
+                      {filter}
                     </button>
-                  </div>
+                  ))}
+                </div>
+                <div className="coverage-breakdown">
+                  <span>{stats.supported} supported</span>
+                  <span>{stats.partial} partial</span>
+                  <span>{stats.delegated} template</span>
+                  <span>{stats.unsupported} unsupported</span>
+                  <span>{stats.locked} locked</span>
+                  <span>{stats.missing} missing</span>
+                </div>
+                <div className="coverage-list inspector-list">
+                  {visibleCoverageItems.length === 0 ? (
+                    <span className="empty-hint">没有匹配的规则。Profile 保存或 Agent 分析后会显示字段级支持状态。</span>
+                  ) : (
+                    visibleCoverageItems.map((item) => {
+                      const evidence = evidenceForField(profileDraft, item.field_path);
+                      const unsupported = unsupportedForField(profileDraft, item.field_path);
+                      return (
+                        <article className="coverage-row inspector-row" key={item.field_path}>
+                          <div className="inspector-row-main">
+                            <div className="inspector-title-line">
+                              <strong>{item.field_path}</strong>
+                              <div className="coverage-tags">
+                                {item.locked_by_user && <em>locked</em>}
+                                <b className={`coverage-pill ${coverageTone(item)}`}>{coverageLabel(item)}</b>
+                              </div>
+                            </div>
+                            <div className="rule-status-grid">
+                              <span>Agent <b>{item.agent}</b></span>
+                              <span>Formatter <b>{item.formatter}</b></span>
+                              <span>QC <b>{item.qc}</b></span>
+                              <span>LLM <b>{item.llm_final_review}</b></span>
+                            </div>
+                            <p>{item.note || `来源：${item.source}；不支持策略：${item.unsupported_behavior}`}</p>
+                            {evidence.length > 0 && (
+                              <div className="evidence-list">
+                                {evidence.slice(0, 3).map((entry, index) => (
+                                  <span key={`${entry.field_path}-${index}`}>
+                                    {entry.source} · {confidenceLabel(entry.confidence)}
+                                    {entry.quote ? ` · ${entry.quote}` : entry.note ? ` · ${entry.note}` : ""}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {unsupported.length > 0 && (
+                              <div className="unsupported-list">
+                                {unsupported.map((entry, index) => (
+                                  <span key={`${entry.field_path}-${index}`}>{entry.field_path}: {entry.message}</span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </article>
+                      );
+                    })
+                  )}
+                </div>
+                {profileDraft.missing_fields.length > 0 && (
+                  <details className="inspector-details">
+                    <summary>缺失字段 · {profileDraft.missing_fields.length}</summary>
+                    <div className="field-chip-list">
+                      {profileDraft.missing_fields.map((field) => <span key={field}>{field}</span>)}
+                    </div>
+                  </details>
                 )}
-              </>
-            )}
-          </section>
-        )}
-      </section>
-
-      <section className="workflow-step" id="profile" aria-labelledby="profile-title">
-        <div className="step-heading with-action">
-          <div className="step-title">
-            <span className="step-index">2</span>
-            <div>
-              <p className="eyebrow">Profile library</p>
-              <h2 id="profile-title">确认并命名 Profile</h2>
-            </div>
-          </div>
-          <button type="button" className="secondary-button" onClick={() => void loadProfiles()} disabled={isLoadingProfiles}>
-            <RefreshCcw size={18} aria-hidden="true" />
-            {isLoadingProfiles ? "加载中" : "刷新 Profile"}
-          </button>
-        </div>
-        {profileError && <p className="error-text">{profileError}</p>}
-
-        <div className="profile-workspace">
-          <aside className="profile-library" aria-label="Profile 列表">
-            {profiles.length === 0 && !profileError ? (
-              <p className="muted">暂无可用 profile。</p>
-            ) : (
-              profiles.map((profile) => {
-                const key = profileKey(profile.profile_id, profile.current_version);
-                return (
-                  <button
-                    type="button"
-                    className={`profile-row ${selectedProfileKey === key ? "selected" : ""}`}
-                    key={key}
-                    onClick={() => setSelectedProfileKey(key)}
-                  >
-                    <span>{profile.name}</span>
-                    <small>{profile.status} · v{profile.current_version} · {profile.source}</small>
-                  </button>
-                );
-              })
+                {profileDraft.unsupported_rules.length > 0 && (
+                  <details className="inspector-details" open={stats.blocked > 0}>
+                    <summary>不支持/不确定规则 · {profileDraft.unsupported_rules.length}</summary>
+                    <div className="unsupported-list">
+                      {profileDraft.unsupported_rules.map((rule, index) => (
+                        <span key={`${rule.field_path}-${index}`}>{rule.field_path}: {rule.message}{rule.suggestion ? `；建议：${rule.suggestion}` : ""}</span>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                {profileDraft.source_documents.length > 0 && (
+                  <details className="inspector-details">
+                    <summary>来源文档 · {profileDraft.source_documents.length}</summary>
+                    <div className="source-doc-list">
+                      {profileDraft.source_documents.map((source, index) => (
+                        <span key={`${source.file_id ?? source.filename}-${index}`}>
+                          {source.source_kind} · {source.filename || source.note || "unnamed"}
+                        </span>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                <details className="json-inspector">
+                  <summary><Braces size={15} /> Profile JSON</summary>
+                  <pre>{JSON.stringify(profileDraft, null, 2)}</pre>
+                </details>
+              </section>
             )}
           </aside>
-
-          <section className="profile-current" aria-live="polite">
-            <div className="result-heading">
-              <div>
-                <p className="eyebrow">{selectedProfile?.id || "No profile selected"}</p>
-                <h3>{selectedProfile?.name || "选择或载入一个 Profile"}</h3>
-              </div>
-              {selectedProfile && <span className={`status-badge ${selectedProfile.status}`}>{selectedProfile.status}</span>}
-            </div>
-            {selectedProfile ? (
-              <dl className="compact-meta">
-                <div>
-                  <dt>版本</dt>
-                  <dd>{selectedProfile.version}</dd>
-                </div>
-                <div>
-                  <dt>页面</dt>
-                  <dd>{selectedProfile.page.size} · {selectedProfile.page.orientation}</dd>
-                </div>
-                <div>
-                  <dt>正文</dt>
-                  <dd>
-                    {selectedProfile.body.font.chinese} / {selectedProfile.body.font.latin} · {selectedProfile.body.font.size_pt}pt · #
-                    {selectedProfile.body.font.color}
-                  </dd>
-                </div>
-                <div>
-                  <dt>更新时间</dt>
-                  <dd>{selectedProfileSummary?.updated_at || "N/A"}</dd>
-                </div>
-              </dl>
-            ) : (
-              <p className="muted">可从左侧选择内置 Profile，也可在上一步载入 Agent 草案。</p>
-            )}
-          </section>
-
-          {profileDraft && (
-            <form className="profile-editor" onSubmit={(event) => event.preventDefault()}>
-              <div className="editor-header">
-                <div>
-                  <p className="eyebrow">Profile editor</p>
-                  <h3>关键规则</h3>
-                </div>
-                <div className="action-row">
-                  <button type="button" className="secondary-button" onClick={createDraftFromSelected}>
-                    <Plus size={18} aria-hidden="true" />
-                    新建 Draft
-                  </button>
-                  <button type="button" onClick={saveProfileDraft} disabled={isSavingProfile}>
-                    <Save size={18} aria-hidden="true" />
-                    {isSavingProfile ? "保存中" : "保存 Profile"}
-                  </button>
-                </div>
-              </div>
-              {(profileSaveError || profileSaveMessage) && (
-                <p className={profileSaveError ? "error-text" : "success-text"}>{profileSaveError || profileSaveMessage}</p>
-              )}
-              <div className="editor-grid">
-                <label>
-                  <span>Profile ID</span>
-                  <input value={profileDraft.id} onChange={(event) => updateProfileDraft((draft) => void (draft.id = event.target.value))} />
-                </label>
-                <label>
-                  <span>名称</span>
-                  <input value={profileDraft.name} onChange={(event) => updateProfileDraft((draft) => void (draft.name = event.target.value))} />
-                </label>
-                <label>
-                  <span>版本</span>
-                  <input value={profileDraft.version} onChange={(event) => updateProfileDraft((draft) => void (draft.version = event.target.value))} />
-                </label>
-                <label>
-                  <span>状态</span>
-                  <select
-                    value={profileDraft.status}
-                    onChange={(event) => updateProfileDraft((draft) => void (draft.status = event.target.value as FormatProfile["status"]))}
-                  >
-                    <option value="draft">draft</option>
-                    <option value="active">active</option>
-                    <option value="archived">archived</option>
-                  </select>
-                </label>
-                <label>
-                  <span>纸张</span>
-                  <select
-                    value={profileDraft.page.size}
-                    onChange={(event) =>
-                      updateProfileDraft((draft) => void (draft.page.size = event.target.value as FormatProfile["page"]["size"]))
-                    }
-                  >
-                    <option value="A4">A4</option>
-                    <option value="Letter">Letter</option>
-                  </select>
-                </label>
-                <label>
-                  <span>方向</span>
-                  <select
-                    value={profileDraft.page.orientation}
-                    onChange={(event) =>
-                      updateProfileDraft(
-                        (draft) => void (draft.page.orientation = event.target.value as FormatProfile["page"]["orientation"]),
-                      )
-                    }
-                  >
-                    <option value="portrait">portrait</option>
-                    <option value="landscape">landscape</option>
-                  </select>
-                </label>
-                <label>
-                  <span>上边距 cm</span>
-                  <input type="number" step="0.1" value={profileDraft.page.margins_cm.top} onChange={(event) => updateProfileDraft((draft) => void (draft.page.margins_cm.top = Number(event.target.value)))} />
-                </label>
-                <label>
-                  <span>下边距 cm</span>
-                  <input type="number" step="0.1" value={profileDraft.page.margins_cm.bottom} onChange={(event) => updateProfileDraft((draft) => void (draft.page.margins_cm.bottom = Number(event.target.value)))} />
-                </label>
-                <label>
-                  <span>左边距 cm</span>
-                  <input type="number" step="0.1" value={profileDraft.page.margins_cm.left} onChange={(event) => updateProfileDraft((draft) => void (draft.page.margins_cm.left = Number(event.target.value)))} />
-                </label>
-                <label>
-                  <span>右边距 cm</span>
-                  <input type="number" step="0.1" value={profileDraft.page.margins_cm.right} onChange={(event) => updateProfileDraft((draft) => void (draft.page.margins_cm.right = Number(event.target.value)))} />
-                </label>
-                <label>
-                  <span>中文正文字体</span>
-                  <input value={profileDraft.body.font.chinese} onChange={(event) => updateProfileDraft((draft) => void (draft.body.font.chinese = event.target.value))} />
-                </label>
-                <label>
-                  <span>英文字体</span>
-                  <input value={profileDraft.body.font.latin} onChange={(event) => updateProfileDraft((draft) => void (draft.body.font.latin = event.target.value))} />
-                </label>
-                <label>
-                  <span>正文字号 pt</span>
-                  <input type="number" step="0.5" value={profileDraft.body.font.size_pt} onChange={(event) => updateProfileDraft((draft) => void (draft.body.font.size_pt = Number(event.target.value)))} />
-                </label>
-                <label className="color-field">
-                  <span>正文字色</span>
-                  <input
-                    type="color"
-                    value={colorInputValue(profileDraft.body.font.color)}
-                    onChange={(event) =>
-                      updateProfileDraft((draft) => void (draft.body.font.color = profileColorValue(event.target.value)))
-                    }
-                  />
-                </label>
-                <label className="color-field">
-                  <span>标题字色</span>
-                  <input
-                    type="color"
-                    value={colorInputValue(profileDraft.headings[0]?.font.color)}
-                    onChange={(event) =>
-                      updateProfileDraft((draft) => {
-                        const nextColor = profileColorValue(event.target.value);
-                        draft.headings.forEach((heading) => {
-                          heading.font.color = nextColor;
-                        });
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  <span>行距</span>
-                  <input type="number" step="0.1" value={profileDraft.body.line_spacing} onChange={(event) => updateProfileDraft((draft) => void (draft.body.line_spacing = Number(event.target.value)))} />
-                </label>
-                <label>
-                  <span>首行缩进字符</span>
-                  <input
-                    type="number"
-                    step="0.5"
-                    value={profileDraft.body.first_line_indent_chars}
-                    onChange={(event) =>
-                      updateProfileDraft((draft) => void (draft.body.first_line_indent_chars = Number(event.target.value)))
-                    }
-                  />
-                </label>
-                <label>
-                  <span>正文对齐</span>
-                  <select
-                    value={profileDraft.body.alignment}
-                    onChange={(event) =>
-                      updateProfileDraft((draft) => void (draft.body.alignment = event.target.value as FormatProfile["body"]["alignment"]))
-                    }
-                  >
-                    <option value="justified">justified</option>
-                    <option value="left">left</option>
-                    <option value="center">center</option>
-                    <option value="right">right</option>
-                  </select>
-                </label>
-                <label>
-                  <span>页眉文字</span>
-                  <input
-                    value={profileDraft.header_footer.header_text ?? ""}
-                    placeholder="留空表示不写页眉"
-                    onChange={(event) =>
-                      updateProfileDraft(
-                        (draft) => void (draft.header_footer.header_text = event.target.value.trim() || null),
-                      )
-                    }
-                  />
-                </label>
-                <label className="color-field">
-                  <span>页眉/页脚字色</span>
-                  <input
-                    type="color"
-                    value={colorInputValue(profileDraft.header_footer.font.color)}
-                    onChange={(event) =>
-                      updateProfileDraft((draft) => void (draft.header_footer.font.color = profileColorValue(event.target.value)))
-                    }
-                  />
-                </label>
-                <label>
-                  <span>页眉对齐</span>
-                  <select
-                    value={profileDraft.header_footer.header_alignment}
-                    onChange={(event) =>
-                      updateProfileDraft(
-                        (draft) =>
-                          void (draft.header_footer.header_alignment = event.target.value as FormatProfile["header_footer"]["header_alignment"]),
-                      )
-                    }
-                  >
-                    <option value="center">center</option>
-                    <option value="left">left</option>
-                    <option value="right">right</option>
-                  </select>
-                </label>
-                <label className="toggle-field">
-                  <span>页脚页码</span>
-                  <input
-                    type="checkbox"
-                    checked={profileDraft.header_footer.footer_page_number}
-                    onChange={(event) =>
-                      updateProfileDraft((draft) => void (draft.header_footer.footer_page_number = event.target.checked))
-                    }
-                  />
-                </label>
-                <label>
-                  <span>页码对齐</span>
-                  <select
-                    value={profileDraft.header_footer.footer_alignment}
-                    onChange={(event) =>
-                      updateProfileDraft(
-                        (draft) =>
-                          void (draft.header_footer.footer_alignment = event.target.value as FormatProfile["header_footer"]["footer_alignment"]),
-                      )
-                    }
-                  >
-                    <option value="center">center</option>
-                    <option value="left">left</option>
-                    <option value="right">right</option>
-                  </select>
-                </label>
-              </div>
-              <details className="advanced-panel">
-                <summary>YAML 导入 / 导出</summary>
-                <div className="action-row">
-                  <button type="button" className="secondary-button" onClick={exportYaml} disabled={isExportingYaml}>
-                    {isExportingYaml ? "导出中" : "导出 YAML"}
-                  </button>
-                  <button type="button" onClick={importYaml} disabled={isImportingYaml}>
-                    {isImportingYaml ? "导入中" : "导入 YAML"}
-                  </button>
-                </div>
-                {(yamlError || yamlMessage) && <p className={yamlError ? "error-text" : "success-text"}>{yamlError || yamlMessage}</p>}
-                <textarea value={yamlText} onChange={(event) => setYamlText(event.target.value)} spellCheck={false} aria-label="Profile YAML" />
-              </details>
-            </form>
-          )}
-        </div>
-      </section>
-
-      <section className="workflow-step" id="process" aria-labelledby="process-title">
-        <div className="step-heading">
-          <span className="step-index">3</span>
-          <div>
-            <p className="eyebrow">Format run</p>
-            <h2 id="process-title">选择 Profile 并上传 Word</h2>
-          </div>
-        </div>
-
-        <div className="process-grid">
-          <div className="run-context">
-            <article>
-              <span>Profile</span>
-              <strong>{selectedProfile ? `${selectedProfile.name} v${selectedProfile.version}` : "未选择"}</strong>
-              <small>
-                {selectedProfile
-                  ? selectedProfile.id
-                  : requirementSession?.profile_draft
-                    ? "Agent 已生成草案，但必须先确认保存为 Profile"
-                    : "需要先在第 1/2 步生成并确认 Profile"}
-              </small>
-            </article>
-            <article>
-              <span>Input</span>
-              <strong>{inputFileRecords.length > 0 ? `${inputFileRecords.length} 份文档已上传` : "未上传"}</strong>
-              <small>{inputFileRecords.length > 0 ? inputFileRecords.map((record) => record.file_id).join(", ") : "支持 .doc / .docx"}</small>
-            </article>
-          </div>
-
-          <form className="upload-box" onSubmit={uploadInputFile}>
-            <label className="file-picker">
-              <Upload size={18} aria-hidden="true" />
-              <span>
-                {selectedInputFiles.length > 0
-                  ? selectedInputFiles.map((file) => file.name).join(", ")
-                  : "选择一份或多份要规范化的 Word 文档"}
-              </span>
-              <input
-                type="file"
-                accept=".doc,.docx"
-                multiple
-                onChange={(event) => {
-                  setSelectedInputFiles(Array.from(event.target.files ?? []));
-                  setInputUploadError(null);
-                }}
-              />
-            </label>
-            <button type="submit" disabled={isUploadingInputFile}>
-              <Upload size={18} aria-hidden="true" />
-              {isUploadingInputFile ? "上传中" : "上传待处理文档"}
-            </button>
-            {inputUploadError && <p className="error-text">{inputUploadError}</p>}
-            {inputFileRecords.length > 0 && (
-              <div className="batch-file-list" aria-label="已上传文档">
-                {inputFileRecords.map((record) => (
-                  <article key={record.file_id}>
-                    <strong>{record.filename}</strong>
-                    <small>{record.file_id}</small>
-                  </article>
-                ))}
-              </div>
-            )}
-          </form>
-        </div>
-
-        <div className="action-row">
-          <button
-            type="button"
-            onClick={createBatch}
-            disabled={inputFileRecords.length === 0 || !selectedProfile || isCreatingBatch}
-          >
-            <ListChecks size={18} aria-hidden="true" />
-            {isCreatingBatch ? "批量处理中" : "开始批量规范化"}
-          </button>
-          <button type="button" className="secondary-button" onClick={createJob} disabled={inputFileRecords.length === 0 || !selectedProfile || isCreatingJob}>
-            <ListChecks size={18} aria-hidden="true" />
-            {isCreatingJob ? "处理中" : "仅处理第一份"}
-          </button>
-          <button type="button" className="secondary-button" onClick={refreshJob} disabled={!job || isRefreshingJob}>
-            <RefreshCcw size={18} aria-hidden="true" />
-            {isRefreshingJob ? "刷新中" : "刷新任务"}
-          </button>
-          <button type="button" className="secondary-button" onClick={refreshBatch} disabled={!batchRun || isRefreshingBatch}>
-            <RefreshCcw size={18} aria-hidden="true" />
-            {isRefreshingBatch ? "刷新中" : "刷新批量"}
-          </button>
-        </div>
-        {jobError && <p className="error-text">{jobError}</p>}
-        {batchRun && (
-          <section className="job-strip" aria-label="批量任务状态">
-            <span className={`status-badge ${batchRun.status}`}>{batchRun.status}</span>
-            <dl className="compact-meta">
-              <div>
-                <dt>batch_id</dt>
-                <dd>{batchRun.batch_id}</dd>
-              </div>
-              <div>
-                <dt>jobs</dt>
-                <dd>{batchRun.job_ids.length}</dd>
-              </div>
-              <div>
-                <dt>profile</dt>
-                <dd>{batchRun.profile_id} v{batchRun.profile_version}</dd>
-              </div>
-              <div>
-                <dt>quality</dt>
-                <dd>{batchRun.items.filter((item) => item.delivery_status === "manual_review_required").length} 份需复核</dd>
-              </div>
-            </dl>
-            {batchRun.error_message && <p className="error-text">{batchRun.error_message}</p>}
-          </section>
-        )}
-        {job && (
-          <section className="job-strip" aria-live="polite">
-            <span className={`status-badge ${job.status}`}>{job.status}</span>
-            <dl className="compact-meta">
-              <div>
-                <dt>job_id</dt>
-                <dd>{job.job_id}</dd>
-              </div>
-              <div>
-                <dt>progress</dt>
-                <dd>{job.progress}%</dd>
-              </div>
-              <div>
-                <dt>current_step</dt>
-                <dd>{job.current_step || "N/A"}</dd>
-              </div>
-              <div>
-                <dt>outputs</dt>
-                <dd>{job.output_file_ids.length}</dd>
-              </div>
-            </dl>
-            {job.error_message && <p className="error-text">{job.error_message}</p>}
-          </section>
-        )}
-      </section>
-
-      <section className="workflow-step" id="delivery" aria-labelledby="delivery-title">
-        <div className="step-heading with-action">
-          <div className="step-title">
-            <span className="step-index">4</span>
-            <div>
-              <p className="eyebrow">Delivery</p>
-              <h2 id="delivery-title">下载规范化文件与质检报告</h2>
-            </div>
-          </div>
-          {qualityReport && (
-            <span className={`quality-gate ${qualityRemainingCount === 0 && qualityReport.summary.all_compliant ? "clear" : "blocked"}`}>
-              <ShieldCheck size={16} aria-hidden="true" />
-              {qualityVerdict}
-            </span>
-          )}
-        </div>
-
-        <section className="delivery-table" aria-label="输出文件">
-          {batchRun && batchRun.items.length > 0 && (
-            <div className="batch-delivery-list" aria-label="批量输出清单">
-              <div className="batch-delivery-toolbar">
-                <strong>批量交付清单</strong>
-                <a className="download-link secondary-download" href={apiClient.downloadBatchManifestUrl(batchRun.batch_id)} download>
-                  <Download size={16} aria-hidden="true" />
-                  下载 Manifest
-                </a>
-              </div>
-              {batchRun.items.map((item, index) => (
-                <article className="batch-delivery-row" key={`${item.input_file_id}-${item.job_id}`}>
-                  <span className={`status-badge ${item.delivery_status}`}>{item.delivery_status}</span>
-                  <div>
-                    <strong>文档 {index + 1}</strong>
-                    <small>{item.input_file_id} · {item.job_id}</small>
-                    <small>
-                      {deliveryStatusLabel(item)} · {deliveryStatusDetail(item)}
-                      {item.fix_loop_ids.length > 0 ? ` · fix-loop ${item.fix_loop_ids.join(", ")}` : ""}
-                    </small>
-                  </div>
-                  <div className="batch-downloads">
-                    {item.final_docx_file_id && (
-                      <a className="download-link" href={apiClient.downloadFileUrl(item.final_docx_file_id)} download>
-                        <Download size={16} aria-hidden="true" />
-                        下载 DOCX
-                      </a>
-                    )}
-                    {item.final_pdf_file_id && (
-                      <a className="download-link" href={apiClient.downloadFileUrl(item.final_pdf_file_id)} download>
-                        <Download size={16} aria-hidden="true" />
-                        下载 PDF
-                      </a>
-                    )}
-                    {item.quality_report_id && (
-                      <>
-                        <a className="download-link secondary-download" href={apiClient.downloadQualityReportUrl(item.quality_report_id, "json")} download>
-                          <Download size={16} aria-hidden="true" />
-                          Report JSON
-                        </a>
-                        <a
-                          className="download-link secondary-download"
-                          href={apiClient.downloadQualityReportUrl(item.quality_report_id, "markdown")}
-                          download
-                        >
-                          <Download size={16} aria-hidden="true" />
-                          Report MD
-                        </a>
-                      </>
-                    )}
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
-          {isLoadingOutputs && <p className="muted">正在读取输出文件元数据。</p>}
-          {outputError && <p className="error-text">{outputError}</p>}
-          {outputFiles.length === 0 && !isLoadingOutputs && !batchRun ? (
-            <p className="muted">规范化任务完成后，DOCX / PDF 会出现在这里。</p>
-          ) : (
-            outputFiles.map((file) => (
-              <article className="delivery-row" key={file.file_id}>
-                <span className={`output-kind ${outputKind(file).toLowerCase()}`}>{outputKind(file)}</span>
-                <strong>{file.filename}</strong>
-                <small>{formatFileSize(file.size)} · {file.mime_type}</small>
-                <a className="download-link" href={apiClient.downloadFileUrl(file.file_id)} download={file.filename}>
-                  <Download size={16} aria-hidden="true" />
-                  下载{outputKind(file)}
-                </a>
-              </article>
-            ))
-          )}
         </section>
 
-        <section className="quality-panel" aria-label="质量报告">
-          <div className="result-heading">
-            <div>
-              <p className="eyebrow">Quality gate</p>
-              <h3>格式质量报告</h3>
-            </div>
-            <div className="action-row">
-              <button type="button" onClick={createQualityReport} disabled={!qualityReportReady || isCreatingQualityReport}>
-                <ClipboardCheck size={18} aria-hidden="true" />
-                {isCreatingQualityReport ? "生成中" : "生成质量报告"}
-              </button>
-              <button type="button" className="secondary-button" onClick={refreshQualityReport} disabled={!qualityReport || isRefreshingQualityReport}>
-                <RefreshCcw size={18} aria-hidden="true" />
-                {isRefreshingQualityReport ? "刷新中" : "刷新报告"}
-              </button>
-            </div>
+        <section id="template" className="panel strip-panel">
+          <div>
+            <p className="eyebrow">Step 2</p>
+            <h2>模板绑定</h2>
           </div>
-          {!qualityReportReady && <p className="muted">需要已完成输出文件和 profile 引用后才能生成质量报告。</p>}
-          {qualityError && <p className="error-text">{qualityError}</p>}
-          {qualityReport && (
-            <div className="quality-report" aria-live="polite">
-              <dl className="compact-meta">
-                <div>
-                  <dt>report_id</dt>
-                  <dd>{qualityReport.report_id}</dd>
-                </div>
-                <div>
-                  <dt>profile</dt>
-                  <dd>{qualityReport.profile_id} v{qualityReport.profile_version}</dd>
-                </div>
-                <div>
-                  <dt>输出文件</dt>
-                  <dd>{qualityReport.output_file_ids.length}</dd>
-                </div>
-                <div>
-                  <dt>生成时间</dt>
-                  <dd>{qualityReport.created_at}</dd>
-                </div>
-              </dl>
-              <div className="quality-counts" aria-label="质量状态计数">
-                {qualityStatusOrder.map((status) => (
-                  <div className={`quality-count ${status}`} key={status}>
-                    <span>{qualityStatusLabels[status]}</span>
-                    <strong>{qualityReport.summary.counts[status] ?? 0}</strong>
-                  </div>
-                ))}
+          <div className="file-strip">
+            <input type="file" accept=".doc,.docx" onChange={(event) => setTemplateFile(event.target.files?.[0] ?? null)} />
+            <button type="button" className="secondary-button" onClick={uploadTemplate} disabled={!templateFile || busy === "template"}>
+              <Layers3 size={17} /> 上传模板
+            </button>
+            {templateFileRecord ? <span>{templateFileRecord.filename}</span> : <span>无模板</span>}
+          </div>
+        </section>
+
+        <section id="source" className="panel strip-panel">
+          <div>
+            <p className="eyebrow">Step 3</p>
+            <h2>待处理文档</h2>
+          </div>
+          <div className="file-strip">
+            <input type="file" multiple accept=".doc,.docx" onChange={(event) => setInputFiles(Array.from(event.target.files ?? []))} />
+            <button type="button" onClick={uploadInputs} disabled={inputFiles.length === 0 || busy === "inputs"}>
+              <Upload size={17} /> 上传文档
+            </button>
+            <span>{inputFileRecords.length ? `${inputFileRecords.length} files ready` : "未上传"}</span>
+          </div>
+        </section>
+
+        <section id="delivery" className="workspace-grid delivery-grid">
+          <div className="panel">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Step 4</p>
+                <h2>导出</h2>
               </div>
-              <div className={`remaining-summary ${qualityRemainingCount === 0 && qualityReport.summary.all_compliant ? "clear" : "attention"}`}>
-                <strong>{qualityVerdict}</strong>
-                <p>
-                  {qualityRemainingCount === 0 && qualityReport.summary.all_compliant
-                    ? "当前报告没有 warning、fail 或 unsupported 项。"
-                    : "仍存在 warning、fail 或 unsupported 项时，系统不会把输出标记为完全合规。"}
-                </p>
-              </div>
-              <section className="capability-panel" aria-label="能力边界">
+              <ShieldCheck className={gatePassed(job?.delivery_gate_summary) ? "gate-ok" : "gate-idle"} size={24} />
+            </div>
+
+            <div className="format-toggles">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={outputFormats.docx}
+                  onChange={(event) => setOutputFormats((current) => ({ ...current, docx: event.target.checked }))}
+                />
+                DOCX
+              </label>
+              <label className={!health?.services.soffice_configured ? "disabled" : ""}>
+                <input
+                  type="checkbox"
+                  checked={outputFormats.pdf}
+                  disabled={!health?.services.soffice_configured}
+                  onChange={(event) => setOutputFormats((current) => ({ ...current, pdf: event.target.checked }))}
+                />
+                PDF
+              </label>
+            </div>
+
+            <div className="actions-row">
+              <button type="button" onClick={createBatch} disabled={!selectedProfileRef || inputFileRecords.length === 0 || busy === "batch"}>
+                <FolderOpen size={17} /> 批量导出
+              </button>
+              <button type="button" className="secondary-button" onClick={createJob} disabled={!selectedProfileRef || inputFileRecords.length === 0 || busy === "job"}>
+                <FileText size={17} /> 单文件导出
+              </button>
+            </div>
+
+            {job && (
+              <section className="status-block">
                 <div>
-                  <strong>自动保证范围</strong>
-                  <p>页面尺寸、页边距、正文/标题字体、行距、首行缩进、基础页眉页脚、页码、表格线、题注居中和 PDF 可读性。</p>
+                  <strong>{job.status}</strong>
+                  <span>{job.current_step}</span>
                 </div>
-                <div>
-                  <strong>复核边界</strong>
-                  <p>
-                    {manualReviewIssues.length === 0
-                      ? "当前没有需要复核的 warning、fail 或 unsupported 项。"
-                      : `当前有 ${manualReviewIssues.length} 项需要处理；脚注尾注、浮动图片、手写目录或 PDF 文本不可抽取不会被伪装成合规。`}
-                  </p>
-                </div>
-                {boundaryIssues.length > 0 && (
-                  <div className="boundary-list">
-                    {boundaryIssues.map((issue) => (
-                      <span className={`boundary-pill ${issue.status}`} key={issue.issue_id}>
-                        {issue.check_key}: {qualityStatusLabels[issue.status]}
-                      </span>
+                <button type="button" className="icon-button" onClick={refreshJob} title="刷新任务">
+                  <RefreshCcw size={16} />
+                </button>
+                {job.error_message && <p className="error-text"><AlertCircle size={16} /> {job.error_message}</p>}
+                {outputFiles.length > 0 && (
+                  <div className="download-list">
+                    {outputFiles.map((file) => (
+                      <a className="download-link" href={apiClient.downloadFileUrl(file.file_id)} key={file.file_id} download>
+                        <Download size={16} /> {outputKind(file)} · {file.filename}
+                      </a>
                     ))}
                   </div>
                 )}
               </section>
-              <div className="action-row">
-                <a className="download-link secondary-download" href={apiClient.downloadQualityReportUrl(qualityReport.report_id, "json")} download>
-                  <Download size={16} aria-hidden="true" />
-                  下载 JSON 报告
-                </a>
-                <a className="download-link secondary-download" href={apiClient.downloadQualityReportUrl(qualityReport.report_id, "markdown")} download>
-                  <Download size={16} aria-hidden="true" />
-                  下载 Markdown 报告
-                </a>
-              </div>
-              <div className="quality-groups">
-                {qualityStatusOrder.map((status) => {
-                  const issues =
-                    qualityReport.issues_by_status[status] ??
-                    qualityReport.issues.filter((issue) => issue.status === status);
-                  return (
-                    <section className="quality-group" key={status}>
-                      <div className="quality-group-heading">
-                        <h4>{qualityStatusLabels[status]}</h4>
-                        <span>{issues.length}</span>
-                      </div>
-                      {issues.length === 0 ? (
-                        <p className="muted">暂无该状态的检查项。</p>
-                      ) : (
-                        issues.map((issue) => (
-                          <article className="quality-issue" key={issue.issue_id}>
-                            <div>
-                              <strong>{issue.title}</strong>
-                              <span className={`severity-badge ${issue.severity}`}>{issue.severity}</span>
-                            </div>
-                            <p>{issue.description || "无补充说明。"}</p>
-                            <small>{issue.profile_rule_ref || "profile rule N/A"} · {issue.location || "location N/A"}</small>
-                            {issue.recommendation && <small>{issue.recommendation}</small>}
-                          </article>
-                        ))
-                      )}
-                    </section>
-                  );
-                })}
-              </div>
+            )}
 
-              <section className="fix-plan-panel" aria-label="Agent 修复执行">
-                <div className="result-heading">
-                  <div>
-                    <p className="eyebrow">Fix loop</p>
-                    <h3>修复执行</h3>
-                  </div>
-                  {fixLoop && <span className={`status-badge ${fixLoop.status}`}>{fixLoop.status}</span>}
+            {batchRun && (
+              <section className="status-block">
+                <div>
+                  <strong>{batchRun.status}</strong>
+                  <span>{batchRun.batch_id}</span>
                 </div>
-                <div className="action-row">
-                  <button type="button" onClick={createFixPlan} disabled={!qualityReport || isCreatingFixPlan}>
-                    <ClipboardCheck size={18} aria-hidden="true" />
-                    {isCreatingFixPlan ? "生成中" : "生成修复建议"}
-                  </button>
-                  <button type="button" className="secondary-button" onClick={selectAllFixableIssues} disabled={!fixPlan || fixableIssueIds.length === 0}>
-                    选择可修复项
-                  </button>
-                  <button
-                    type="button"
-                    onClick={confirmFixLoop}
-                    disabled={!fixPlan || selectedFixIssueIds.length === 0 || isConfirmingFixLoop || isExecutingFixLoop}
-                  >
-                    <Save size={18} aria-hidden="true" />
-                    {isExecutingFixLoop ? "执行中" : isConfirmingFixLoop ? "确认中" : "执行所选修复"}
-                  </button>
+                <button type="button" className="icon-button" onClick={refreshBatch} title="刷新批量任务">
+                  <RefreshCcw size={16} />
+                </button>
+                <div className="delivery-list">
+                  {batchRun.items.map((item) => (
+                    <DeliveryItem item={item} key={item.job_id} />
+                  ))}
                 </div>
-                {fixPlanError && <p className="error-text">{fixPlanError}</p>}
-                {fixPlan && (
-                  <div className="fix-plan-detail">
-                    <dl className="compact-meta">
-                      <div>
-                        <dt>fix_plan_id</dt>
-                        <dd>{fixPlan.fix_plan_id}</dd>
-                      </div>
-                      <div>
-                        <dt>自动动作</dt>
-                        <dd>{fixPlan.actions.length}</dd>
-                      </div>
-                      <div>
-                        <dt>人工复核</dt>
-                        <dd>{fixPlan.manual_review_issue_ids.length}</dd>
-                      </div>
-                      <div>
-                        <dt>已选择</dt>
-                        <dd>{selectedFixIssueIds.length}</dd>
-                      </div>
-                    </dl>
-                    <div className="fix-action-list">
-                      {fixPlan.actions.length === 0 ? (
-                        <p className="muted">没有可自动修复动作，需要人工复核。</p>
-                      ) : (
-                        fixPlan.actions.map((action) => (
-                          <label className="fix-action-row" key={`${action.action}-${action.target_issue_ids.join("-")}`}>
-                            <input
-                              type="checkbox"
-                              checked={action.target_issue_ids.every((issueId) => selectedFixIssueIds.includes(issueId))}
-                              onChange={() => action.target_issue_ids.forEach(toggleSelectedFixIssue)}
-                            />
-                            <span>
-                              <strong>{action.action}</strong>
-                              <small>{action.target_issue_ids.join(", ")}</small>
-                            </span>
-                          </label>
-                        ))
-                      )}
-                    </div>
-                    {fixPlan.manual_review_issue_ids.length > 0 && (
-                      <section className="manual-review-box">
-                        <strong>人工复核项</strong>
-                        <p>{fixPlan.manual_review_issue_ids.join(", ")}</p>
-                      </section>
-                    )}
-                  </div>
-                )}
-                {fixLoop && (
-                  <section className="fix-loop-record">
-                    <strong>已创建 fix-loop 记录</strong>
-                    <dl className="compact-meta">
-                      <div>
-                        <dt>fix_loop_id</dt>
-                        <dd>{fixLoop.fix_loop_id}</dd>
-                      </div>
-                      <div>
-                        <dt>selected</dt>
-                        <dd>{fixLoop.selected_issue_ids.length}</dd>
-                      </div>
-                      <div>
-                        <dt>new_job</dt>
-                        <dd>{fixLoop.new_job_id || "pending"}</dd>
-                      </div>
-                      <div>
-                        <dt>updated_report</dt>
-                        <dd>{fixLoop.updated_report_id || "pending"}</dd>
-                      </div>
-                    </dl>
-                  </section>
+                {batchRun.manifest_download_url && (
+                  <a className="download-link secondary-download" href={apiClient.downloadBatchManifestUrl(batchRun.batch_id)} download>
+                    <Download size={16} /> manifest
+                  </a>
                 )}
               </section>
+            )}
+
+            {outputError && <p className="error-text"><AlertCircle size={16} /> {outputError}</p>}
+          </div>
+
+          <aside className="panel inventory-panel">
+            <h3>上传队列</h3>
+            <div className="mini-list">
+              {inputFileRecords.length === 0 ? (
+                <span>empty</span>
+              ) : (
+                inputFileRecords.map((file) => (
+                  <div className="mini-row" key={file.file_id}>
+                    <FileText size={15} />
+                    <span>{file.filename}</span>
+                    <small>{formatFileSize(file.size)}</small>
+                  </div>
+                ))
+              )}
             </div>
-          )}
+          </aside>
         </section>
       </section>
     </main>
+  );
+}
+
+function DeliveryItem({ item }: { item: DeliveryManifestItem }) {
+  return (
+    <article className={`delivery-item ${item.delivery_status}`}>
+      <div>
+        <strong>{deliveryLabel(item)}</strong>
+        <span>{item.failure_reason || item.job_id}</span>
+      </div>
+      <div className="download-list compact-downloads">
+        {item.final_docx_file_id && (
+          <a className="download-link" href={apiClient.downloadFileUrl(item.final_docx_file_id)} download>
+            <Download size={15} /> DOCX
+          </a>
+        )}
+        {item.final_pdf_file_id && (
+          <a className="download-link" href={apiClient.downloadFileUrl(item.final_pdf_file_id)} download>
+            <Download size={15} /> PDF
+          </a>
+        )}
+      </div>
+    </article>
   );
 }
 

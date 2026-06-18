@@ -1,6 +1,6 @@
 # Backend
 
-FastAPI backend for the Word Format Agent workbench. It provides file upload/download, deterministic Profile schema validation, versioned Profile storage, YAML import/export, requirement sessions, format jobs, batch delivery manifests, the first DOCX/PDF formatting engine, bounded profile rule extraction jobs, structured quality reports, and user-confirmed fix-loop execution records.
+FastAPI backend for the Word Format Agent workbench. It provides file upload/download, Profile v2 schema validation, versioned Profile storage, YAML import/export, requirement sessions, compiler-driven format jobs, batch delivery manifests, internal QC delivery gating, and optional DOCX/PDF final delivery.
 
 ## Install and Run
 
@@ -21,7 +21,7 @@ curl http://127.0.0.1:8000/api/health
 
 The worker has two paths:
 
-- Jobs with `profile_id` and `profile_version` use `DocumentFormattingService` to resolve the uploaded file and immutable profile version, convert `.doc` to `.docx` when needed, parse the input, apply profile-driven DOCX formatting, export PDF when `SOFFICE_BIN` is configured, register generated output files, and update `output_file_ids`.
+- Jobs with `profile_id` and `profile_version` use `DocumentFormattingService` to resolve the uploaded file and immutable profile version, convert `.doc` to `.docx` when needed, parse the input, run `FormatCompiler`, execute the internal QC delivery gate, export PDF when requested, register only verified final output files, and update `output_file_ids`.
 - Jobs without a profile keep the compatibility placeholder path: the worker verifies the input file exists and marks the job completed.
 
 Use the app settings so the worker sees the same `FILE_STORAGE_ROOT` and `SOFFICE_BIN` values as the API:
@@ -30,7 +30,7 @@ Use the app settings so the worker sees the same `FILE_STORAGE_ROOT` and `SOFFIC
 uv run python -c "from app.core.config import get_settings; from app.jobs.worker import process_next_queued_job; from app.storage.local import LocalFileStorage; from app.storage.repository import JsonMetadataRepository; settings=get_settings(); storage=LocalFileStorage(settings.file_storage_root); print(process_next_queued_job(JsonMetadataRepository(settings.file_storage_root / 'metadata.json'), storage=storage, soffice_bin=settings.soffice_bin))"
 ```
 
-Failure diagnostics are stored on the job as `error_message`, for example missing input/profile records, corrupt DOCX parse failures, or missing LibreOffice for `.doc` conversion/PDF export.
+Failure diagnostics are stored on the job as `error_message`, for example missing input/profile/template records, corrupt DOCX parse failures, internal QC failures, or missing LibreOffice for `.doc` conversion/PDF export.
 
 ## Document Formatting Engine
 
@@ -38,16 +38,20 @@ Document modules live under `app/documents/`:
 
 - `converter.py`: bypasses `.docx`; converts legacy `.doc` to `.docx` through LibreOffice headless when `SOFFICE_BIN` is configured.
 - `parser.py`: inspects DOCX paragraph/table/image counts, heading candidates, styles, and extracted text before formatting.
+- `compiler.py`: the production export entrypoint; composes optional templates, calls deterministic formatting helpers, and returns a candidate DOCX for internal gate validation.
+- `template.py`: applies conservative template body-slot binding for fixed pages and source document body insertion.
 - `formatter.py`: applies profile page size/orientation, page margins, basic header text, footer PAGE numbering, body fonts, line spacing, first-line indent, heading styles, caption/equation/reference paragraph formatting, basic three-line table borders, and Word `updateFields` for refreshable fields while preserving paragraph text.
 - `ooxml.py`: inspects and safely patches DOCX package XML for field refresh, TOC fields, sections, footnotes/endnotes, images, numbering references, and OMML equation counts.
 - `exporter.py`: exports formatted DOCX to PDF through LibreOffice; the worker requests PDF output when `SOFFICE_BIN` is configured.
-- `service.py`: orchestrates input/profile lookup, conversion, parsing, formatting, optional PDF export, output storage, and repository registration.
+- `service.py`: orchestrates input/profile/template lookup, conversion, parsing, compiler execution, internal QC delivery gate, optional PDF export, final output storage, and repository registration.
+- `app/quality/final_layout_review.py`: builds final PDF layout review payloads from extracted text plus rendered page images when `pdftoppm` is available, then calls an OpenAI-compatible LLM reviewer for garbled text, blank pages, overlap, and table/figure overflow checks.
 
 Required environment:
 
 - `.docx` formatting: `FILE_STORAGE_ROOT` and a valid profile version.
 - `.doc` conversion: `SOFFICE_BIN` must point to an existing LibreOffice/soffice binary.
 - PDF export: `SOFFICE_BIN` must point to an existing LibreOffice/soffice binary.
+- Final LLM layout review: `LLM_API_KEY` and `LLM_MODEL` are required when the selected Profile has `llm_final_review.enabled=true` and `llm_final_review.required=true`. Use a multimodal model if page-image review is expected.
 
 ## Requirement Sessions
 
@@ -76,7 +80,7 @@ Profile extraction modules live under `app/agents/` and expose a strict boundary
 - `resolve_extraction_source(...)`: accepts either an uploaded `.doc/.docx` rules file or non-empty natural-language rules.
 - `extract_rule_source_text(...)`: extracts `.docx` paragraph/table text and routes legacy `.doc` through the LibreOffice conversion adapter.
 - `RuleExtractionProvider`: narrow provider interface for Agent output; tests inject fake providers instead of calling a live model.
-- `ConfiguredLLMRuleExtractionProvider`: default runtime provider that reads `LLM_API_KEY` and `LLM_MODEL`; it currently returns a readable local-MVP error instead of making network calls.
+- `ConfiguredLLMRuleExtractionProvider`: default runtime provider that reads `LLM_API_KEY`, `LLM_MODEL`, and optional OpenAI-compatible gateway settings, sends live extraction requests with `stream=true`, parses JSON or SSE responses, and fails visibly when the provider is unavailable.
 - `parse_agent_extraction_output(...)`: accepts structured JSON/YAML only and validates `profile_draft`, `uncertain_items`, and `evidence`.
 - `ProfileExtractionService`: creates queued extraction records, processes provider output, stores completed review payloads, and records failures without creating profiles automatically.
 
@@ -97,11 +101,12 @@ GET  /api/files/{file_id}
 GET  /api/files/{file_id}/download
 ```
 
-## Quality Reports and Fix Plans
+## Internal QC Delivery Gate and Compatibility Checks
 
 Quality modules live under `app/quality/`:
 
 - `inspection.py`: performs local DOCX/PDF checks and returns `QualityIssue` records.
+- `delivery_gate.py`: runs inspection as an internal fail-closed delivery gate, optionally reapplies safe profile formatting, and returns pass/fail summaries without creating user-facing report artifacts.
 - `service.py`: resolves output files and profile versions, runs inspection, builds `QualityReport`, computes summary counts, and persists reports.
 - `fix_planning.py`: creates deterministic Agent-style explanations and validates whitelisted `FixPlan` actions.
 - `fix_execution.py`: executes confirmed whitelisted formatting actions, writes fixed DOCX/PDF outputs, creates a second-pass job, and persists an updated quality report.
@@ -121,7 +126,15 @@ DOCX quality inspection currently checks:
 
 PDF quality inspection checks a readable PDF envelope, page count, extractable text, and an obvious blank/image-only warning. It uses `pypdf` for text/page inspection with a lightweight byte-level fallback. When the checker cannot judge a feature safely, it records `fail` or `unsupported` with a readable diagnostic instead of returning `pass`.
 
-Quality report routes:
+The production export path calls `delivery_gate.py` internally. Candidate DOCX files are not registered as final outputs unless the gate passes. The older quality report routes remain available for compatibility and debugging:
+
+When PDF output is requested and the selected Profile enables final LLM layout review, the export path runs:
+
+```text
+verified DOCX -> PDF export -> deterministic PDF QC -> LLM layout review -> final downloads
+```
+
+The LLM reviewer receives a PDF text excerpt and, when local `pdftoppm` is available, up to three rendered page images. If the reviewer is not configured and the Profile marks final review as required, the job fails closed with a concise `error_message` and no final PDF download is published.
 
 ```text
 POST /api/quality-reports
@@ -143,7 +156,7 @@ POST /api/quality-reports/{report_id}/fix-loops/{fix_loop_id}/execute
 }
 ```
 
-Reports include `summary.counts`, `summary.remaining_issue_count`, `summary.all_compliant`, flat `issues`, and grouped `issues_by_status` for `pass/fixed/warning/fail/unsupported`. A completed formatting job is not treated as proof of compliance; warning, fail, and unsupported issues remain visible.
+Reports include `summary.counts`, `summary.remaining_issue_count`, `summary.all_compliant`, flat `issues`, and grouped `issues_by_status` for `pass/fixed/warning/fail/unsupported`. They are not part of the primary user delivery flow.
 
 Fix planning is intentionally constrained. The deterministic planner only considers warning/fail/unsupported issues, explains each issue, and emits whitelisted actions:
 
@@ -176,13 +189,15 @@ POST /api/profiles/import
 GET  /api/profiles/{profile_id}/versions/{version}/export
 ```
 
-Job creation accepts optional profile references:
+Job creation accepts optional profile, template, and output-format references:
 
 ```json
 {
   "input_file_id": "file_xxx",
   "profile_id": "ecnu_thesis",
-  "profile_version": "1.0.0"
+  "profile_version": "1.0.0",
+  "template_file_id": "file_optional_template",
+  "output_formats": ["docx", "pdf"]
 }
 ```
 
@@ -198,9 +213,9 @@ GET  /api/batches/{batch_id}
 GET  /api/batches/{batch_id}/manifest
 ```
 
-`POST /api/batches` accepts one Profile reference and multiple uploaded Word file ids. Each input receives its own `JobRecord`, DOCX/PDF outputs when possible, and a quality report. With the default `auto_fix=true`, the batch route automatically executes one safe fix-loop for whitelisted quality issues, then points the manifest to the repaired outputs and updated report when the second pass is compliant. The returned `BatchFormatRun.items` list is the delivery manifest used by the frontend download table.
+`POST /api/batches` accepts one Profile reference, optional template file id, output formats, and multiple uploaded Word file ids. Each input receives its own `JobRecord`; only internally verified final DOCX/PDF outputs are exposed in the returned `BatchFormatRun.items` delivery manifest.
 
-If the final generated quality report still has remaining warning/fail/unsupported issues, that job is marked `quality_failed`, the item is marked `manual_review_required`, and the batch status becomes `quality_failed`. This is intentional fail-closed behavior: completed file generation is separate from final compliance.
+If the internal QC delivery gate still has remaining warning/fail/unsupported issues, that job is marked `quality_failed`, the item is marked `manual_review_required`, and the batch status becomes `quality_failed`. This is intentional fail-closed behavior: candidate file generation is separate from final compliance.
 
 ## Tests
 

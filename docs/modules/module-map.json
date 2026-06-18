@@ -1,0 +1,98 @@
+{
+  "modules": [
+    {
+      "id": "frontend-workbench",
+      "name": "前端工作台",
+      "source_paths": ["frontend/src"],
+      "granularity": "应用前端",
+      "reason": "承载 Profile 创建、格式规则配置、文件上传、导出状态和下载交付等用户主流程，后续前端体验升级可稳定归属。",
+      "docs_dir": "docs/modules/frontend/src"
+    },
+    {
+      "id": "agent-requirement-intake",
+      "name": "Agent 需求与规则抽取",
+      "source_paths": [
+        "backend/app/agents",
+        "backend/app/api/requirement_sessions.py",
+        "backend/app/api/profile_extractions.py"
+      ],
+      "granularity": "工作流",
+      "reason": "承载对话入口、格式文件读取、LLM 结构化抽取、证据链和缺失项确认，是 Profile 生成的长期能力。",
+      "docs_dir": "docs/modules/backend/app/agents"
+    },
+    {
+      "id": "profile-management",
+      "name": "Profile 管理",
+      "source_paths": [
+        "backend/app/profiles",
+        "backend/app/api/profiles.py",
+        "profiles"
+      ],
+      "granularity": "共享能力",
+      "reason": "承载格式 Profile schema、版本管理、种子数据、YAML 导入导出和后续 v2 schema 迁移。",
+      "docs_dir": "docs/modules/backend/app/profiles"
+    },
+    {
+      "id": "document-export-engine",
+      "name": "文档导出引擎",
+      "source_paths": [
+        "backend/app/documents",
+        "backend/app/jobs",
+        "backend/app/api/jobs.py",
+        "backend/app/api/batches.py"
+      ],
+      "granularity": "核心工作流",
+      "reason": "承载 DOC/DOCX 解析、格式化、PDF 导出、单文档任务和批量交付，是后续 FormatCompiler 的主要落点。",
+      "docs_dir": "docs/modules/backend/app/documents"
+    },
+    {
+      "id": "internal-qc-delivery-gate",
+      "name": "内部 QC 交付门",
+      "source_paths": [
+        "backend/app/quality",
+        "backend/app/api/quality_reports.py"
+      ],
+      "granularity": "核心工作流",
+      "reason": "当前承载质量检查、修复计划和修复执行，后续将收敛为不产出用户报告的内部 QC 交付门。",
+      "docs_dir": "docs/modules/backend/app/quality"
+    },
+    {
+      "id": "file-storage-runtime",
+      "name": "文件存储与运行配置",
+      "source_paths": [
+        "backend/app/storage",
+        "backend/app/api/files.py",
+        "backend/app/core/config.py"
+      ],
+      "granularity": "基础设施能力",
+      "reason": "承载上传文件、输出文件、metadata、本地存储和环境变量配置，是所有任务与文件交付的基础依赖。",
+      "docs_dir": "docs/modules/backend/app/storage"
+    },
+    {
+      "id": "backend-api-shell",
+      "name": "后端 API 壳层",
+      "source_paths": [
+        "backend/app/main.py",
+        "backend/app/models.py",
+        "backend/app/api"
+      ],
+      "granularity": "应用后端",
+      "reason": "承载 FastAPI 应用入口、路由聚合、共享 API 模型和跨模块 API 契约。",
+      "docs_dir": "docs/modules/backend/app/api"
+    },
+    {
+      "id": "dev-docs-ops",
+      "name": "研发文档与本地运维",
+      "source_paths": [
+        "scripts",
+        "docs",
+        "openspec",
+        "issues",
+        "plan.md"
+      ],
+      "granularity": "研发流程能力",
+      "reason": "承载一键启动、产品计划、OpenSpec artifacts、issues CSV 和文档驱动研发流程。",
+      "docs_dir": "docs/modules/dev-docs-ops"
+    }
+  ]
+}

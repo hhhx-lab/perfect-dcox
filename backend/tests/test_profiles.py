@@ -137,6 +137,13 @@ def test_valid_profile_payload_is_accepted() -> None:
     assert profile.id == "sample_thesis"
     assert profile.page.margins_cm.left == 3.0
     assert profile.body.font.latin == "Times New Roman"
+    assert profile.document_grid.enabled is False
+    assert profile.toc.include_levels == 3
+    assert profile.table.border_style == "three_line"
+    assert profile.table.enforce_caption_above is True
+    assert profile.figure.placement == "inline"
+    assert profile.figure.half_column_max_mm == 60
+    assert profile.unit_rules.enforce_consistency is True
 
 
 def test_missing_required_profile_field_is_rejected() -> None:
@@ -191,7 +198,10 @@ def test_ecnu_builtin_profile_is_loaded_from_yaml() -> None:
     assert ecnu.abstract.length_range_chars.min == 300
     assert ecnu.abstract.length_range_chars.max == 500
     assert ecnu.table.caption.position == "above"
+    assert ecnu.table.border_style == "three_line"
     assert ecnu.figure.caption.position == "below"
+    assert ecnu.figure.full_width_min_mm == 100
+    assert ecnu.figure.full_width_max_mm == 130
     assert ecnu.header_footer.footer_page_number is True
     assert ecnu.quality.check_fonts is True
 
@@ -214,6 +224,17 @@ def test_invalid_character_range_is_rejected() -> None:
         FormatProfile.model_validate(payload)
 
     assert "max must be greater than or equal to min" in str(exc.value)
+
+
+def test_invalid_figure_width_range_is_rejected() -> None:
+    payload = valid_profile_payload()
+    payload["figure"]["full_width_min_mm"] = 140  # type: ignore[index]
+    payload["figure"]["full_width_max_mm"] = 130  # type: ignore[index]
+
+    with pytest.raises(ValidationError) as exc:
+        FormatProfile.model_validate(payload)
+
+    assert "full_width_max_mm must be greater than full_width_min_mm" in str(exc.value)
 
 
 def test_repository_persists_profile_versions_and_rejects_duplicates(tmp_path) -> None:
