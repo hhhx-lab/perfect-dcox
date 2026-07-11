@@ -21,3 +21,5 @@ storage/*
 word-format-agent-*.png
 *.log
 *.tmp
+.vercel
+.env*
